@@ -1,0 +1,26 @@
+# dsh-vocab-review bundle patch
+#
+# Inserts the Host plugin row. The Client half is discovered from
+# package.json `dsh.client` and the `./client` export.
+#
+# Daily limits default to 0 = unlimited for the total/minutes caps; the per-type
+# defaults cap runaway review days. All of them (and reminderMaxPerDay) are also
+# editable at runtime from the sidebar panel and stored in settings.json.
+- insert:
+    - id: vocab-review
+      name: dsh-vocab-review
+      config:
+        queueSize: 5
+        wrongInject: 2
+        retryDelayMinutes: 5
+        ladderMinutes: [30, 180, 720, 2880, 10080, 43200]
+        highMultiplier: 0.7
+        lowMultiplier: 1.6
+        maxRecentErrors: 5
+        startPrompt: 开始词汇复习
+        continuePrompt: 继续复习
+        dailyNewLimit: 20
+        dailyReviewLimit: 50
+        dailyTotalLimit: 0
+        dailyMinutesLimit: 0
+        reminderMaxPerDay: 1

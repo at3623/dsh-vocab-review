@@ -1,0 +1,8 @@
+node_modules/
+test/crops/
+*.log
+.DS_Store
+.idea/
+.vscode/
+ledger.json
+settings.json

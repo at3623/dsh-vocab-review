@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Vocabulary review",
+    "description": "Turns an uploaded worksheet image into a one-word-at-a-time review loop. The model extracts only the underlined English words and calls vocab_import; the plugin keeps the clean list, never the image. The plugin owns ledger.json and settings.json, wrong-word error counts and re-asks, the 30m→3h→12h→2d→7d→30d spaced-repetition ladder, the compact QUEUE/DUE lines injected each turn, the configurable daily new/review/total/minutes quotas with the 今日已达上限 stop state, the once-per-day due reminder (sidebar badge, panel banner, optional browser notification), a conversation selector that routes every Q/A prompt to the selected non-archived session and persists it in settings.json, and a strong-pause Stop (agent.cancel + jobs/terminals/subagents cleanup, silent, no transcript message). Adds a left-sidebar Vocabulary review panel with due count, recent error words, queue, counters, Start/Stop/Pause, and editable limits saved without a restart. Review runs in the selected chat session. Turn the plugin off to stop all injection, reminders and API routes; ledger.json and settings.json stay on disk."
+  }
+}
