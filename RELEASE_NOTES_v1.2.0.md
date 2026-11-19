@@ -20,7 +20,7 @@ Vocabulary review for DeepSeek Harness: import underlined words from a worksheet
 ## 安装 / Install
 
 ```powershell
-dsh plugin --profile <profile> add github:<github-user>/dsh-vocab-review
+dsh plugin --profile <profile> add github:at3623/dsh-vocab-review
 ```
 
 Or DSH → **Plugins** → **Add plugin** → select this directory.

@@ -5,6 +5,14 @@
   "type": "module",
   "license": "MIT",
   "author": "At",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/at3623/dsh-vocab-review.git"
+  },
+  "homepage": "https://github.com/at3623/dsh-vocab-review#readme",
+  "bugs": {
+    "url": "https://github.com/at3623/dsh-vocab-review/issues"
+  },
   "keywords": [
     "deepseek-harness",
     "dsh",

@@ -9,7 +9,7 @@ Requires DeepSeek Harness 0.2.x, Node 22+, and no extra npm dependencies.
 **From GitHub** (once this repository is pushed):
 
 ```powershell
-dsh plugin --profile <profile> add github:<github-user>/dsh-vocab-review
+dsh plugin --profile <profile> add github:at3623/dsh-vocab-review
 ```
 
 **Local directory**: DSH → **Plugins** → **Add plugin** → select this directory, or call the Plugin Manager's `install_bundle` with the absolute path.
