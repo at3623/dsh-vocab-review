@@ -71,6 +71,9 @@ window.__ModuleLoader__.load({
       qqTest: 'Test push',
       qqTestSent: 'Test message sent to QQ',
       qqSending: 'Sending…',
+      idleDone: 'All due words reviewed',
+      nextDue: 'next due',
+      autoContinue: 'The loop keeps asking while words are due; it stops only when every due word is done or a daily limit is hit.',
     }
     const ZH = {
       title: '单词复习',
@@ -122,6 +125,9 @@ window.__ModuleLoader__.load({
       qqTest: '测试推送',
       qqTestSent: '已向 QQ 发送测试消息',
       qqSending: '发送中…',
+      idleDone: '今天到期的单词都已复习完',
+      nextDue: '下一个到期',
+      autoContinue: '只要还有到期的单词就会自动继续；全部复习完或达到每日上限时才停。',
     }
 
     let clientCtx = null
@@ -306,6 +312,7 @@ window.__ModuleLoader__.load({
 .vr-pause:disabled { opacity: 0.55; cursor: default; }
 .vr-error { color: var(--dsw-alias-state-error-primary); font-size: 12px; }
 .vr-quota { color: var(--dsw-alias-state-error-primary); font-size: 13px; font-weight: 600; }
+.vr-idle { font-size: 12px; color: var(--dsw-alias-label-secondary); }
 .vr-banner { border: 1px solid var(--dsw-alias-border-l1); border-radius: 8px; background: var(--dsw-alias-bg-layer-1); padding: 8px 12px; font-size: 13px; display: flex; gap: 8px; align-items: center; }
 .vr-banner-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--dsw-alias-brand-primary); flex: none; }
 .vr-section { border-top: 1px solid var(--dsw-alias-border-l1); padding-top: 14px; display: flex; flex-direction: column; gap: 8px; }
@@ -349,6 +356,11 @@ window.__ModuleLoader__.load({
         if (!clientCtx || !clientCtx.locale) return undefined
         return clientCtx.locale.subscribe(() => setRevision((value) => value + 1))
       }, [])
+    }
+
+    function clockText(ms) {
+      const date = new Date(ms)
+      return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`
     }
 
     function Panel() {
@@ -493,6 +505,7 @@ window.__ModuleLoader__.load({
       const recent = snapshot && Array.isArray(snapshot.recentErrors) ? snapshot.recentErrors : []
       const counters = snapshot && snapshot.counters ? snapshot.counters : { new: 0, review: 0, total: 0, minutes: 0 }
       const quota = snapshot ? snapshot.quota : null
+      const idleReason = snapshot ? snapshot.idleReason : null
       const reminder = snapshot ? snapshot.reminder : null
       const qq = snapshot ? snapshot.qq : null
       const showReminder = reminder && reminder.dueCount > 0 && snapshot.dueNow > 0 && !running
@@ -572,6 +585,13 @@ window.__ModuleLoader__.load({
             `${t('today')}: ${t('newLabel')} ${counters.new} · ${t('reviewLabel')} ${counters.review} · ${counters.total} ${t('questions')} · ${Math.round(counters.minutes)} ${t('minutes')}`,
           ),
           quota ? h('div', { className: 'vr-quota', role: 'status' }, quota.message) : null,
+          !running && idleReason && idleReason.kind === 'no-due'
+            ? h(
+                'div',
+                { className: 'vr-idle', role: 'status' },
+                `${t('idleDone')}${Number.isFinite(idleReason.nextDueAt) ? ` · ${t('nextDue')} ${clockText(idleReason.nextDueAt)}` : ''}`,
+              )
+            : null,
           showReminder
             ? h(
                 'div',
@@ -615,6 +635,7 @@ window.__ModuleLoader__.load({
               : null,
           ),
           error || actionError ? h('div', { className: 'vr-error', role: 'alert' }, error || actionError) : null,
+          !running ? h('div', { className: 'vr-hint' }, t('autoContinue')) : null,
           total === 0
             ? h('div', { className: 'vr-section' }, h('div', { className: 'vr-empty' }, t('empty')))
             : h(

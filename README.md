@@ -43,7 +43,16 @@ The bundle patch inserts the `vocab-review` row; the Client half is discovered f
 
 - The panel **Stop** button sets the loop from `running` to `stopped`. The plugin simply does **not issue the next question**. It never calls `agent.cancel` and never injects a "stopped" message, so the transcript stays clean. If a model reply is in flight, it finishes and is recorded; then the loop stops.
 - Answered words are already persisted and the queue is kept. **Start** resumes from the queue head without recounting the question that was already counted.
-- Loop states: `idle` (nothing queued / session done), `running`, `stopped`.
+- Loop states: `idle` (nothing left to ask — see `idleReason`), `running`, `stopped`.
+
+## Continuous review (auto-continue)
+
+A queue holds `queueSize` words (default 5) — that is a **batch size, not a session length**. With `autoContinue` on (the default), the loop refills itself from words that are due **now** and keeps asking, so it no longer goes quiet after a handful of words.
+
+- Refill only takes words whose `dueAt <= now`, so auto-continue never asks a word far ahead of its schedule. A word that was just answered is pushed forward (`ladder`, or `retryDelayMinutes` after an error) and therefore is not re-picked immediately.
+- The loop now ends in exactly two ways: the daily limit is hit (`loop: "stopped"` plus `今日已达上限 (…)`), or nothing is due any more (`loop: "idle"` plus `idleReason`).
+- When it stops by itself it says why instead of going silent: the panel shows `今天到期的单词都已复习完 · 下一个到期 17:35`, and in QQ mode the plugin pushes one short line — `✅ 今天到期的单词都复习完了（今日 N 个，下一个 17:35 到期）。想继续就回「开始背单词」。`
+- `autoContinue: false` in the plugin config restores the old "one batch per Start" behaviour; `queueSize` (1–20) tunes the batch.
 
 ## Daily quota (req. 11)
 
@@ -125,7 +134,7 @@ It is silent: no prompt, no `steer`, no fake transcript message. Afterwards the 
 ## Verification
 
 - `npm test` — runs the three offline harnesses below.
-- `node test/harness.mjs` — Host harness: 3-word import, ✅/❌ ledger updates, compact injection, loop Pause (no prompt, queue kept), Start resume without double-counting, `dailyTotalLimit=5`, live settings edits, once-per-day reminder, date rollover, reload persistence, and the QQ channel (binding discovery, Start pushes `Q:` through `send_qq_message` without prompting the web session, QQ-graded answer recorded, next question pushed only after that turn ends).
+- `node test/harness.mjs` — Host harness: 3-word import, ✅/❌ ledger updates, compact injection, loop Pause (no prompt, queue kept), Start resume without double-counting, `dailyTotalLimit=5`, live settings edits, once-per-day reminder, date rollover, reload persistence, the QQ channel (binding discovery, Start pushes `Q:` through `send_qq_message` without prompting the web session, QQ-graded answer recorded, next question pushed only after that turn ends), continuous review (with `queueSize: 2` the loop still asks all 5 due words, then goes `idle` with a `no-due` reason), and the QQ idle note that explains an automatic stop.
 - `node test/sessions-stop.mjs` — conversation list (titles, archived/subagent excluded), selection persisted in `settings.json` + reload, Start routed to the selected session, strong-pause Stop (cancel + jobs/terminals/subagents, silent, `turnInFlight` false), idle Stop no-op, archived-selection fallback.
 - `node test/client-load-check.mjs` — evaluates the Client bundle with a mocked module loader and asserts the sidebar/main registrations.
 - `test/make_test_image.py` — regenerates the 3-underlined-word fixture (`pip install pillow`).

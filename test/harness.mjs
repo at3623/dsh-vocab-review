@@ -503,5 +503,56 @@ assert.match(qqEnv.qqPushes[1], /^Q: /u)
 assert.equal(loadLedger(join(root, 'qq-ledger')).words[pending].correct, 1, 'the QQ-graded answer is recorded')
 console.log('PASS QQ channel: binding discovered, Start pushes Q to QQ, QQ answer graded, next Q pushed after turn/end')
 
+// ── 12. Continuous review: autoContinue keeps asking past one batch ──────
+const contDir = join(root, 'continue')
+const contEnv = freshEnv(contDir, { queueSize: 2, wrongInject: 0 })
+await contEnv.tools.get('vocab_import').execute({ words: 'alpha, beta, gamma, delta, epsilon' }, { agent: contEnv.agent })
+assert.deepEqual(loadLedger(contDir).queue, ['alpha', 'beta'], 'one batch is queueSize words')
+for (let index = 0; index < 5; index++) {
+  const word = loadLedger(contDir).pendingWord
+  assert.ok(word, `question ${index + 1} is pending`)
+  fire(contEnv, answerText(`✅ ${word} = m`))
+  await new Promise((resolve) => setTimeout(resolve, 20))
+}
+const contLedger = loadLedger(contDir)
+for (const word of ['alpha', 'beta', 'gamma', 'delta', 'epsilon']) {
+  assert.equal(contLedger.words[word].correct, 1, `${word} was asked even beyond the first batch`)
+}
+assert.equal(contLedger.dailyCounters.total, 5, 'five questions were asked in one continuous session')
+assert.equal(contEnv.prompts.length, 4, 'one continuation per answer except the last')
+assert.equal(contLedger.loop, 'idle', 'the loop only stops once nothing is due')
+assert.equal(contLedger.idleReason.kind, 'no-due')
+assert.ok(contLedger.idleReason.nextDueAt > Date.now(), 'the idle reason carries the next due time')
+const contState = await state(contEnv)
+assert.equal(contState.loop, 'idle')
+assert.equal(contState.dueNow, 0)
+assert.ok(contState.idleReason && contState.idleReason.kind === 'no-due')
+console.log('PASS continuous review: autoContinue refills past queueSize=2, asks all 5 due words, stops with a no-due reason')
+
+// ── 13. QQ channel: the automatic stop explains itself ──────────────────
+const qqIdleDir = join(root, 'qq-idle')
+const qqIdleEnv = freshEnv(qqIdleDir, { qqStatePath }, {
+  sessionId: 'session-web',
+  sessions: [
+    { sessionId: 'session-web', updatedAt: Date.now(), projections: { values: { title: 'Web chat' } } },
+    { sessionId: qqBindingSession, updatedAt: Date.now(), projections: { values: { title: 'QQ chat' } } },
+  ],
+  qqSend: true,
+})
+await qqIdleEnv.tools.get('vocab_import').execute({ words: 'solo' }, { agent: qqIdleEnv.agent })
+await post(qqIdleEnv, 'select', { sessionId: qqBindingSession })
+const qqIdleStarted = await post(qqIdleEnv, 'start')
+assert.equal(qqIdleStarted.ok, true)
+await new Promise((resolve) => setTimeout(resolve, 120))
+assert.equal(qqIdleEnv.qqPushes.length, 1, 'Start pushed the only question')
+fire(qqIdleEnv, answerText(`✅ ${loadLedger(qqIdleDir).pendingWord} = m`), { id: qqBindingSession })
+await new Promise((resolve) => setTimeout(resolve, 150))
+const qqIdleLedger = loadLedger(qqIdleDir)
+assert.equal(qqIdleLedger.loop, 'idle')
+assert.equal(qqIdleLedger.idleReason.kind, 'no-due')
+assert.equal(qqIdleEnv.qqPushes.length, 2, 'QQ gets one message explaining why review stopped')
+assert.match(qqIdleEnv.qqPushes[1], /复习完/u)
+console.log('PASS QQ idle: an automatic stop pushes one explanation to QQ instead of going silent')
+
 rmSync(root, { recursive: true, force: true })
 console.log('\nALL CHECKS PASSED')

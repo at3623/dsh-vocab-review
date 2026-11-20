@@ -27,7 +27,10 @@ const REMINDER_TICK_MS = 60_000
 const REMINDER_MIN_GAP_MS = 3 * 60 * 60_000
 
 const DEFAULTS = {
+  // Words held in the queue at once. `autoContinue` keeps the loop alive after
+  // the queue drains, so this is a batch size, not a session length.
   queueSize: 5,
+  autoContinue: true,
   wrongInject: 2,
   retryDelayMinutes: 5,
   ladderMinutes: [30, 180, 720, 2880, 10080, 43200], // 30m, 3h, 12h, 2d, 7d, 30d
@@ -107,6 +110,7 @@ function resolveConfig(config) {
   const dshHome = process.env.DSH_HOME || process.env.DSH_PROFILE_DIR || join(homedir(), '.dsh')
   return {
     queueSize: clampInt(raw.queueSize, 1, 20, DEFAULTS.queueSize),
+    autoContinue: raw.autoContinue === false ? false : DEFAULTS.autoContinue,
     wrongInject: clampInt(raw.wrongInject, 0, 10, DEFAULTS.wrongInject),
     retryDelayMinutes: clampNum(raw.retryDelayMinutes, 0.1, 1440, DEFAULTS.retryDelayMinutes),
     ladderMinutes: ladder.length > 0 ? ladder : DEFAULTS.ladderMinutes.slice(),
@@ -254,6 +258,7 @@ export function apply(ctx, config) {
       plugin: PLUGIN,
       updatedAt: Date.now(),
       loop: 'idle',
+      idleReason: null,
       activeSessionId: null,
       queue: [],
       queueCreatedAt: null,
@@ -319,6 +324,14 @@ export function apply(ctx, config) {
           }
         }
         if (parsed.quota && typeof parsed.quota === 'object' && typeof parsed.quota.message === 'string') next.quota = parsed.quota
+        if (parsed.idleReason && typeof parsed.idleReason === 'object' && typeof parsed.idleReason.kind === 'string') {
+          next.idleReason = {
+            kind: parsed.idleReason.kind,
+            at: Number.isFinite(parsed.idleReason.at) ? parsed.idleReason.at : Date.now(),
+            nextDueAt: Number.isFinite(parsed.idleReason.nextDueAt) ? parsed.idleReason.nextDueAt : null,
+            count: Number.isFinite(parsed.idleReason.count) ? parsed.idleReason.count : null,
+          }
+        }
         if (Number.isFinite(parsed.reminderVersion)) next.reminderVersion = parsed.reminderVersion
         if (Number.isFinite(parsed.reminderAt)) next.reminderAt = parsed.reminderAt
         if (Number.isFinite(parsed.reminderDueCount)) next.reminderDueCount = parsed.reminderDueCount
@@ -684,6 +697,45 @@ export function apply(ctx, config) {
     return state.quota
   }
 
+  function clockText(ms) {
+    const date = new Date(ms)
+    return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`
+  }
+
+  // The loop stops by itself only when there is nothing left to ask. Say why
+  // out loud instead of going quiet: the panel reads `idleReason` and the QQ
+  // channel gets one short message.
+  function goIdle(reason, options = {}) {
+    cancelQqPush()
+    const meta = reason && typeof reason === 'object' ? reason : {}
+    state.loop = 'idle'
+    state.pendingWord = null
+    state.pendingCounted = false
+    state.idleReason = {
+      kind: typeof meta.kind === 'string' ? meta.kind : 'empty',
+      at: Date.now(),
+      nextDueAt: Number.isFinite(meta.nextDueAt) ? meta.nextDueAt : nextDueAt(),
+      count: Number.isFinite(meta.count) ? meta.count : null,
+    }
+    markTick()
+    saveLedger()
+    if (options.silent !== true) notifyIdle(state.idleReason)
+    return state.idleReason
+  }
+
+  function notifyIdle(reason) {
+    if (!qqMode()) return
+    const done = state.dailyCounters.total
+    let text = ''
+    if (reason.kind === 'no-due') {
+      const next = Number.isFinite(reason.nextDueAt) ? `，下一个 ${clockText(reason.nextDueAt)} 到期` : ''
+      text = `✅ 今天到期的单词都复习完了（今日 ${done} 个${next}）。想继续就回「开始背单词」。`
+    } else if (reason.kind === 'empty') {
+      text = '复习已结束：词库里还没有单词。先导入单词表，再回「开始背单词」。'
+    }
+    if (text) qqPushText(text)
+  }
+
   function clearQuotaIfDateChanged() {
     ensureDay()
   }
@@ -697,13 +749,26 @@ export function apply(ctx, config) {
     return entries().filter((word) => word.dueAt <= now)
   }
 
+  function nextDueAt(now = Date.now()) {
+    let best = null
+    for (const word of entries()) {
+      if (word.dueAt <= now) continue
+      if (best === null || word.dueAt < best) best = word.dueAt
+    }
+    return best
+  }
+
   function intervalOf(word) {
     const stage = Math.min(word.stage, cfg.ladderMinutes.length - 1)
     const minutes = cfg.ladderMinutes[stage] * frequencyMultiplier(word.freq, cfg)
     return Math.max(60_000, Math.round(minutes * 60_000))
   }
 
-  function buildQueue(now = Date.now()) {
+  // `dueOnly` is the continuous mode: it only ever takes words that are due
+  // right now, so an auto-continued loop stops instead of asking a word far
+  // ahead of its schedule.
+  function buildQueue(now = Date.now(), options = {}) {
+    const dueOnly = options.dueOnly === true
     const picked = []
     const seen = new Set()
     const take = (word) => {
@@ -721,6 +786,7 @@ export function apply(ctx, config) {
       return a.dueAt - b.dueAt
     })
     for (const word of due) take(word)
+    if (dueOnly) return picked
 
     // 2. Randomly inject previously-wrong items.
     const wrongPool = shuffle(entries().filter((word) => word.errors > 0 && !seen.has(word.word)))
@@ -756,11 +822,18 @@ export function apply(ctx, config) {
   function beginQuestion() {
     if (state.loop !== 'running') return { ok: false, reason: 'not-running' }
     ensureDay()
+    if (state.queue.length === 0 && cfg.autoContinue) {
+      // Continuous review: refill with words that are due now and keep asking.
+      // This is what makes a session run past one queueSize batch.
+      const refilled = buildQueue(Date.now(), { dueOnly: true })
+      if (refilled.length > 0) {
+        state.queue = refilled
+        state.queueCreatedAt = Date.now()
+        markTick()
+      }
+    }
     if (state.queue.length === 0) {
-      state.loop = 'idle'
-      state.pendingWord = null
-      state.pendingCounted = false
-      saveLedger()
+      goIdle({ kind: entries().length === 0 ? 'empty' : 'no-due', count: 0 })
       return { ok: false, reason: 'empty' }
     }
     const headKey = state.queue[0]
@@ -818,17 +891,13 @@ export function apply(ctx, config) {
       saveLedger()
       return
     }
-    if (state.queue.length === 0) {
-      state.loop = 'idle'
-      state.pendingWord = null
-      state.pendingCounted = false
-      cancelQqPush()
-      markTick()
+    // beginQuestion refills the queue from due words (autoContinue) and goes
+    // idle with a reason when nothing is left to ask.
+    const next = beginQuestion()
+    if (!next.ok) {
       saveLedger()
       return
     }
-    const next = beginQuestion()
-    if (!next.ok) return
     if (qqMode()) {
       // If the model (against protocol) already printed the next Q line, the
       // bot delivered that line; pushing again would ask the same word twice.
@@ -847,8 +916,7 @@ export function apply(ctx, config) {
       state.queue = buildQueue()
       state.queueCreatedAt = Date.now()
       if (state.queue.length === 0) {
-        state.loop = 'idle'
-        saveLedger()
+        goIdle({ kind: 'empty', nextDueAt: null }, { silent: true })
         return { ok: false, error: 'no-words' }
       }
     }
@@ -858,6 +926,7 @@ export function apply(ctx, config) {
     }
     state.loop = 'running'
     state.quota = null
+    state.idleReason = null
     if (typeof target === 'string' && target) state.activeSessionId = target
     const question = beginQuestion()
     if (!question.ok) {
@@ -942,6 +1011,7 @@ export function apply(ctx, config) {
     state.pendingWord = null
     state.pendingCounted = false
     state.quota = null
+    state.idleReason = null
     const sameSession = Boolean(sessionId) && routed === sessionId
     if (!sameSession) {
       state.loop = 'stopped'
@@ -1248,9 +1318,14 @@ export function apply(ctx, config) {
       output: toolOutput,
       async execute() {
         const summary = publicState()
+        const next = summary.idleReason && Number.isFinite(summary.idleReason.nextDueAt)
+          ? ` · next due ${clockText(summary.idleReason.nextDueAt)}`
+          : summary.nextDueAt
+            ? ` · next due ${clockText(summary.nextDueAt)}`
+            : ''
         return {
           ok: true,
-          message: `DUE: ${summary.dueNow} due now · ${summary.wrongCount} wrong · ${summary.total} words · loop ${summary.loop} · today ${summary.counters.total} questions. QUEUE: ${summary.queue.join(', ') || '(empty)'}`,
+          message: `DUE: ${summary.dueNow} due now · ${summary.wrongCount} wrong · ${summary.total} words · loop ${summary.loop}${next} · today ${summary.counters.total} questions. QUEUE: ${summary.queue.join(', ') || '(empty)'}`,
           ...summary,
         }
       },
@@ -1442,6 +1517,8 @@ export function apply(ctx, config) {
       }))
     return {
       loop: state.loop,
+      idleReason: state.idleReason,
+      nextDueAt: nextDueAt(now),
       queue: state.queue.slice(),
       pendingWord: state.pendingWord,
       activeSessionId: state.activeSessionId,
