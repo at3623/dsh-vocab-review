@@ -43,6 +43,10 @@ const DEFAULTS = {
   dailyTotalLimit: 0,
   dailyMinutesLimit: 0,
   reminderMaxPerDay: 1,
+  // QQ channel (dsh-qq-bot): 'auto' delivers on QQ when the selected
+  // conversation is the QQ-bound session; 'qq' forces it; 'session' never does.
+  channel: 'auto',
+  qqStatePath: '',
 }
 
 const SETTINGS_KEYS = ['dailyNewLimit', 'dailyReviewLimit', 'dailyTotalLimit', 'dailyMinutesLimit', 'reminderMaxPerDay']
@@ -117,6 +121,10 @@ function resolveConfig(config) {
     dailyTotalLimit: clampInt(raw.dailyTotalLimit, 0, 10_000, DEFAULTS.dailyTotalLimit),
     dailyMinutesLimit: clampInt(raw.dailyMinutesLimit, 0, 24 * 60, DEFAULTS.dailyMinutesLimit),
     reminderMaxPerDay: clampInt(raw.reminderMaxPerDay, 0, 10, DEFAULTS.reminderMaxPerDay),
+    channel: raw.channel === 'qq' || raw.channel === 'session' ? raw.channel : DEFAULTS.channel,
+    qqStatePath: typeof raw.qqStatePath === 'string' && raw.qqStatePath.trim()
+      ? raw.qqStatePath.trim()
+      : join(dshHome, 'integrations', 'dsh-qq-bot', 'state.json'),
   }
 }
 
@@ -257,6 +265,8 @@ export function apply(ctx, config) {
       reminderVersion: 0,
       reminderAt: null,
       reminderDueCount: 0,
+      qqLastSendAt: null,
+      qqError: '',
       words: {},
     }
   }
@@ -312,6 +322,8 @@ export function apply(ctx, config) {
         if (Number.isFinite(parsed.reminderVersion)) next.reminderVersion = parsed.reminderVersion
         if (Number.isFinite(parsed.reminderAt)) next.reminderAt = parsed.reminderAt
         if (Number.isFinite(parsed.reminderDueCount)) next.reminderDueCount = parsed.reminderDueCount
+        if (Number.isFinite(parsed.qqLastSendAt)) next.qqLastSendAt = parsed.qqLastSendAt
+        if (typeof parsed.qqError === 'string') next.qqError = parsed.qqError
       } else {
         // v1 upgrade: an old "mode: review" queue becomes a stopped loop so the
         // plugin never starts asking questions on its own after an upgrade.
@@ -356,6 +368,8 @@ export function apply(ctx, config) {
       remindCount: 0,
       lastRemindAt: null,
       selectedSessionId: '',
+      previousSessionId: '',
+      channel: cfg.channel,
     }
     try {
       if (!existsSync(settingsPath)) return next
@@ -369,6 +383,8 @@ export function apply(ctx, config) {
       if (Number.isFinite(parsed.remindCount)) next.remindCount = parsed.remindCount
       if (Number.isFinite(parsed.lastRemindAt)) next.lastRemindAt = parsed.lastRemindAt
       if (typeof parsed.selectedSessionId === 'string') next.selectedSessionId = parsed.selectedSessionId
+      if (typeof parsed.previousSessionId === 'string') next.previousSessionId = parsed.previousSessionId
+      if (parsed.channel === 'qq' || parsed.channel === 'session' || parsed.channel === 'auto') next.channel = parsed.channel
       return next
     } catch (error) {
       ctx.logger?.warn?.(`${PLUGIN}: could not read ${settingsPath}: ${String(error)}`)
@@ -444,6 +460,10 @@ export function apply(ctx, config) {
   }
 
   async function ensureSelectedSession() {
+    if (settings.channel === 'qq') {
+      const binding = qqBinding()
+      if (binding.available && binding.sessionId) return binding.sessionId
+    }
     const rows = await listSessionOptions()
     const current = selectedSessionId()
     if (current) {
@@ -459,7 +479,141 @@ export function apply(ctx, config) {
   }
 
   function routedSessionId() {
+    const binding = qqBinding()
+    if (binding.available && binding.sessionId) {
+      if (settings.channel === 'qq') return binding.sessionId
+      if (settings.channel === 'auto' && selectedSessionId() === binding.sessionId) return binding.sessionId
+    }
     return selectedSessionId() || state.activeSessionId || ''
+  }
+
+  // ── QQ channel (dsh-qq-bot bridge) ───────────────────────────────────────
+  // The official QQ bot keeps its single session binding and its last chat
+  // target in its own state file; this plugin only reads that file. Delivery
+  // reuses the bot's `send_qq_message` tool, so no AppID/secret, socket, or
+  // second bot connection is duplicated here. Answers typed in QQ reach the
+  // bound DSH session through the bot's normal inbound path, and the plugin
+  // grades them from the same session events it already watches.
+  let qqCache = { at: 0, value: null }
+
+  function qqBinding(force = false) {
+    if (!force && qqCache.value !== null && Date.now() - qqCache.at < 2_000) return qqCache.value
+    const value = {
+      available: false,
+      sessionId: '',
+      target: null,
+      ownerOpenId: '',
+      path: cfg.qqStatePath,
+      error: '',
+    }
+    try {
+      if (existsSync(cfg.qqStatePath)) {
+        const doc = JSON.parse(readFileSync(cfg.qqStatePath, 'utf8'))
+        value.available = true
+        if (typeof doc.sessionId === 'string') value.sessionId = doc.sessionId
+        if (doc.target && typeof doc.target.targetId === 'string' && doc.target.targetId) value.target = doc.target
+        if (typeof doc.ownerOpenId === 'string') value.ownerOpenId = doc.ownerOpenId
+      }
+    } catch (error) {
+      value.error = String(error && error.message ? error.message : error)
+    }
+    qqCache = { at: Date.now(), value }
+    return value
+  }
+
+  function qqTool() {
+    try {
+      const tools = ctx.get('tools')
+      if (!tools || typeof tools.get !== 'function') return null
+      const definition = tools.get('send_qq_message')
+      return definition && typeof definition.execute === 'function' ? definition : null
+    } catch {
+      return null
+    }
+  }
+
+  function qqSendText(text) {
+    const body = String(text === undefined || text === null ? '' : text).trim()
+    if (!body) return Promise.resolve({ ok: false, error: 'empty QQ message' })
+    const definition = qqTool()
+    if (!definition) {
+      return Promise.resolve({ ok: false, error: 'send_qq_message 工具不可用：未安装或未启用 QQ 机器人插件' })
+    }
+    const args = { text: body }
+    const execution = {
+      callId: `vocab-review-qq-${randomUUID()}`,
+      name: 'send_qq_message',
+      arguments: args,
+      signal: new AbortController().signal,
+    }
+    return Promise.resolve()
+      .then(() => definition.execute(args, execution))
+      .then((value) => ({ ok: true, value }))
+      .catch((error) => ({ ok: false, error: String(error && error.message ? error.message : error) }))
+  }
+
+  // Fire-and-forget push; the outcome is persisted so the panel can show it.
+  function qqPushText(text) {
+    const body = String(text === undefined || text === null ? '' : text).trim()
+    if (!body) return
+    void qqSendText(body).then((result) => {
+      state.qqLastSendAt = Date.now()
+      state.qqError = result.ok ? '' : result.error
+      if (!result.ok) ctx.logger?.warn?.(`${PLUGIN}: QQ delivery failed: ${result.error}`)
+      saveLedger()
+    })
+  }
+
+  function qqMode() {
+    const binding = qqBinding()
+    if (!binding.available || !binding.sessionId) return false
+    if (settings.channel === 'session') return false
+    if (settings.channel === 'qq') return true
+    return selectedSessionId() === binding.sessionId
+  }
+
+  function questionLine(word) {
+    return `Q: ${word && typeof word.word === 'string' ? word.word : ''}`
+  }
+
+  // A pushed question must not overtake the graded answer the QQ bot is still
+  // delivering for the turn that produced it: wait for that turn to end, then
+  // give the bot's own send a short head start.
+  const QQ_NEXT_DELAY_MS = 1_500
+  const QQ_NEXT_FALLBACK_MS = 8_000
+  let qqNextPush = null
+  let qqNextToken = 0
+
+  function queueQqPush(text) {
+    cancelQqPush()
+    const token = ++qqNextToken
+    const timer = setTimeout(() => {
+      if (token !== qqNextToken) return
+      qqNextPush = null
+      qqPushText(text)
+    }, QQ_NEXT_FALLBACK_MS)
+    timer.unref?.()
+    qqNextPush = { text: String(text), sessionId: routedSessionId(), timer }
+  }
+
+  function armQqPush(sessionId) {
+    const pending = qqNextPush
+    if (!pending || !sessionId || pending.sessionId !== sessionId) return
+    qqNextPush = null
+    if (pending.timer) clearTimeout(pending.timer)
+    const token = ++qqNextToken
+    const timer = setTimeout(() => {
+      if (token !== qqNextToken) return
+      qqPushText(pending.text)
+    }, QQ_NEXT_DELAY_MS)
+    timer.unref?.()
+  }
+
+  function cancelQqPush() {
+    qqNextToken += 1
+    if (!qqNextPush) return
+    if (qqNextPush.timer) clearTimeout(qqNextPush.timer)
+    qqNextPush = null
   }
 
   // ── Date rollover + quota ────────────────────────────────────────────────
@@ -522,6 +676,7 @@ export function apply(ctx, config) {
   }
 
   function setQuotaStopped(block) {
+    cancelQqPush()
     state.loop = 'stopped'
     state.quota = { ...block, message: quotaMessage(block), at: Date.now() }
     state.lastTickAt = Date.now()
@@ -634,6 +789,11 @@ export function apply(ctx, config) {
   function issueContinue(sessionId) {
     const target = routedSessionId() || sessionId
     if (!target) return
+    if (qqMode()) {
+      const head = state.words[state.queue[0]]
+      if (head) qqPushText(questionLine(head))
+      return
+    }
     const token = ++continueToken
     void Promise.resolve()
       .then(() => {
@@ -653,7 +813,7 @@ export function apply(ctx, config) {
       })
   }
 
-  function advanceAfterAnswer(sessionId) {
+  function advanceAfterAnswer(sessionId, modelAsked = '') {
     if (state.loop !== 'running') {
       saveLedger()
       return
@@ -662,12 +822,20 @@ export function apply(ctx, config) {
       state.loop = 'idle'
       state.pendingWord = null
       state.pendingCounted = false
+      cancelQqPush()
       markTick()
       saveLedger()
       return
     }
     const next = beginQuestion()
     if (!next.ok) return
+    if (qqMode()) {
+      // If the model (against protocol) already printed the next Q line, the
+      // bot delivered that line; pushing again would ask the same word twice.
+      if (modelAsked && next.word && modelAsked === next.word.word) return
+      queueQqPush(questionLine(next.word))
+      return
+    }
     issueContinue(sessionId)
   }
 
@@ -699,6 +867,7 @@ export function apply(ctx, config) {
   }
 
   function stopLoop() {
+    cancelQqPush()
     markTick()
     state.loop = 'stopped'
     saveLedger()
@@ -805,6 +974,24 @@ export function apply(ctx, config) {
     '5. If the user asks to stop, call vocab_stop. Stop is handled by the plugin, not by you.',
   ].join('\n')
 
+  // QQ variant: the plugin pushes each question itself, so the model must not
+  // repeat it. A [QQ] message is the answer the model has to grade.
+  const QQ_REVIEW_PROTOCOL = [
+    '[Vocabulary review is ACTIVE — QQ channel]',
+    'The plugin sends every `Q: {word}` line to QQ directly. Follow this strictly:',
+    '1. Never print a `Q:` line on your own — except when a tool result explicitly says "Ask only the first word now: Q: {word}". In that single case reply with exactly that one line.',
+    '2. A user message that starts with `[QQ]` is the user answering the pending word — the injected PENDING/QUEUE-first word. Judge it and reply with exactly one line: `✅ {word} = {meaning}` or `❌ {word} = {meaning}` (short meaning, Chinese is fine). The QQ bot relays this line to the user — add nothing else.',
+    '3. If that message is clearly not an answer (e.g. 开始/继续/停止/统计 or a pasted word list), use the matching tool instead: vocab_start, vocab_stop, vocab_stats, vocab_import.',
+    '4. The plugin records answers and schedules the next question; never calculate due words, quota, or timing yourself. The next `Q:` line arrives from the plugin.',
+    '5. Keep replies to QQ short: one line unless a tool result asks otherwise.',
+  ].join('\n')
+
+  // QQ idle: the loop is not running, but this chat still speaks vocabulary.
+  const QQ_IDLE_PROTOCOL = [
+    '[Vocabulary review on QQ]',
+    'This QQ conversation can run the vocabulary review. When the user asks to start or continue reviewing, call vocab_start (never invent words). To stop, call vocab_stop; for a summary, call vocab_stats; when the user pastes or lists English words, call vocab_import with them.',
+  ].join('\n')
+
   function reviewActiveFor(agentId) {
     return state.loop === 'running'
       && state.queue.length > 0
@@ -813,7 +1000,11 @@ export function apply(ctx, config) {
   }
 
   function protocolText(agentId) {
-    return reviewActiveFor(agentId) ? `${IMPORT_SECTION}\n\n${REVIEW_PROTOCOL}` : ''
+    const active = reviewActiveFor(agentId)
+    const onQq = typeof agentId === 'string' && agentId !== '' && agentId === qqBinding().sessionId
+    if (active) return `${IMPORT_SECTION}\n\n${onQq ? QQ_REVIEW_PROTOCOL : REVIEW_PROTOCOL}`
+    if (onQq) return `${IMPORT_SECTION}\n\n${QQ_IDLE_PROTOCOL}`
+    return ''
   }
 
   function queueText(agentId) {
@@ -821,7 +1012,12 @@ export function apply(ctx, config) {
     const now = Date.now()
     const due = dueNowList(now).length
     const wrong = entries().filter((word) => word.errors > 0).length
-    return `QUEUE: ${state.queue.join(', ')}\nDUE: ${due} due now · ${wrong} wrong · ${entries().length} words`
+    const lines = [`QUEUE: ${state.queue.join(', ')}`, `DUE: ${due} due now · ${wrong} wrong · ${entries().length} words`]
+    if (qqMode()) {
+      const head = state.words[state.queue[0]]
+      lines.push(`PENDING: ${head ? head.word : ''}`)
+    }
+    return lines.join('\n')
   }
 
   const agentScopes = new Map()
@@ -896,7 +1092,11 @@ export function apply(ctx, config) {
       if (recordAnswer(key, correct, match[2], sessionId)) recorded = true
     }
     if (!recorded) return
-    advanceAfterAnswer(sessionId)
+    // The next `Q:` line usually comes from the plugin, but a model replying
+    // with both the grade and the next question must not make the plugin ask it
+    // a second time.
+    const asked = /(?:^|\n)\s*Q:\s*([A-Za-z][A-Za-z'-]*)/u.exec(text)
+    advanceAfterAnswer(sessionId, asked ? normalizeWord(asked[1]) : '')
   }
 
   function textOfEvent(event) {
@@ -910,6 +1110,13 @@ export function apply(ctx, config) {
 
   ctx.on('session/event', (session, event) => {
     if (!event || typeof event.type !== 'string') return
+    if (event.type === 'turn/end') {
+      // Deliver the queued next question only after the graded answer's own
+      // turn finished, so the bot's reply is not overtaken by the next Q line.
+      const endedId = session && typeof session.id === 'string' ? session.id : ''
+      if (endedId) armQqPush(endedId)
+      return
+    }
     if (event.type === 'assistant/message') {
       handleAssistantText(textOfEvent(event), session)
       return
@@ -1077,6 +1284,12 @@ export function apply(ctx, config) {
     state.reminderDueCount = dueNowList(now).length
     saveLedger()
     ctx.logger?.info?.(`${PLUGIN}: reminder #${settings.remindCount} today for ${state.reminderDueCount} due words`)
+    if (state.loop !== 'running') {
+      const binding = qqBinding()
+      if (qqMode() && binding.target) {
+        qqPushText(`⏰ 词汇复习提醒：今天有 ${state.reminderDueCount} 个单词到期。回复「开始背单词」继续复习。`)
+      }
+    }
   }
 
   ctx.effect(() => ctx.timer.interval(checkReminder, REMINDER_TICK_MS), `${PLUGIN}: reminder timer`)
@@ -1189,6 +1402,28 @@ export function apply(ctx, config) {
   }
 
   // ── Compact state for the sidebar panel and the local API ────────────────
+  function qqStatus() {
+    const binding = qqBinding()
+    const definition = qqTool()
+    const rows = sessionCache.rows || []
+    const bound = rows.find((row) => row.sessionId === binding.sessionId)
+    const owner = binding.ownerOpenId || ''
+    return {
+      installed: Boolean(binding.available || definition),
+      available: Boolean(binding.available && binding.sessionId && binding.target),
+      bound: Boolean(binding.available && binding.sessionId),
+      tool: Boolean(definition),
+      channel: settings.channel,
+      mode: qqMode(),
+      sessionId: binding.sessionId || '',
+      sessionTitle: bound ? bound.title : '',
+      owner: owner ? `${owner.slice(0, 4)}…` : '',
+      statePath: binding.path,
+      lastSendAt: Number.isFinite(state.qqLastSendAt) ? state.qqLastSendAt : null,
+      error: state.qqError || binding.error || (definition ? '' : 'send_qq_message 工具不可用：未安装或未启用 QQ 机器人插件'),
+    }
+  }
+
   function publicState() {
     ensureDay()
     const now = Date.now()
@@ -1212,6 +1447,7 @@ export function apply(ctx, config) {
       activeSessionId: state.activeSessionId,
       selectedSessionId: selectedSessionId(),
       turnInFlight: turnInFlightFor(routedSessionId()),
+      qq: qqStatus(),
       client: clientDiagnostics(),
       interruptAt: Number.isFinite(state.interruptAt) ? state.interruptAt : null,
       dueNow: all.filter((word) => word.dueAt <= now).length,
@@ -1227,6 +1463,7 @@ export function apply(ctx, config) {
         dailyTotalLimit: settings.dailyTotalLimit,
         dailyMinutesLimit: settings.dailyMinutesLimit,
         reminderMaxPerDay: settings.reminderMaxPerDay,
+        channel: settings.channel,
       },
       reminder: {
         version: state.reminderVersion,
@@ -1297,6 +1534,9 @@ export function apply(ctx, config) {
 
   function applySettingsPatch(body) {
     const next = { ...settings }
+    if (body && (body.channel === 'auto' || body.channel === 'qq' || body.channel === 'session')) {
+      next.channel = body.channel
+    }
     for (const key of SETTINGS_KEYS) {
       if (body[key] === undefined) continue
       const n = Number(body[key])
@@ -1327,7 +1567,8 @@ export function apply(ctx, config) {
             return
           }
           if (req.method === 'POST' && action === 'start') {
-            const sessionId = await ensureSelectedSession()
+            const onQq = qqMode()
+            const sessionId = onQq ? qqBinding().sessionId : await ensureSelectedSession()
             if (!sessionId) {
               writeJson(res, 200, { ok: false, error: { code: 'no-session', message: 'Select a conversation in the panel first.' } })
               return
@@ -1348,19 +1589,26 @@ export function apply(ctx, config) {
               })
               return
             }
-            try {
-              await ctx.sessionController.prompt(
-                {
-                  requestId: `vocab-review-${randomUUID()}`,
-                  sessionId,
-                  mode: 'queue',
-                  content: [{ type: 'text', text: cfg.startPrompt }],
-                },
-                new AbortController().signal,
-              )
-            } catch (error) {
-              stopLoop()
-              throw error
+            if (onQq) {
+              // QQ delivery: the plugin pushes the question itself; no agent
+              // turn is needed to carry it into the chat.
+              const head = state.words[state.queue[0]]
+              if (head) qqPushText(questionLine(head))
+            } else {
+              try {
+                await ctx.sessionController.prompt(
+                  {
+                    requestId: `vocab-review-${randomUUID()}`,
+                    sessionId,
+                    mode: 'queue',
+                    content: [{ type: 'text', text: cfg.startPrompt }],
+                  },
+                  new AbortController().signal,
+                )
+              } catch (error) {
+                stopLoop()
+                throw error
+              }
             }
             writeJson(res, 200, { ok: true, value: { ...(await stateWithSessions()), sessionId } })
             return
@@ -1385,7 +1633,59 @@ export function apply(ctx, config) {
               return
             }
             rememberSelected(wanted)
+            // Picking a conversation explicitly overrides a forced QQ channel;
+            // picking the QQ-bound one again re-enters QQ mode automatically.
+            if (settings.channel === 'qq') {
+              settings.channel = 'auto'
+              saveSettings()
+            }
             writeJson(res, 200, { ok: true, value: await stateWithSessions() })
+            return
+          }
+          if (req.method === 'POST' && action === 'qq/enable') {
+            const binding = qqBinding(true)
+            if (!binding.available || !binding.sessionId) {
+              writeJson(res, 200, {
+                ok: false,
+                error: { code: 'qq-unbound', message: 'QQ 机器人尚未绑定会话：先在 QQ 里给机器人发一条消息，或在会话菜单里绑定。' },
+                value: await stateWithSessions(),
+              })
+              return
+            }
+            const current = selectedSessionId()
+            if (current && current !== binding.sessionId) settings.previousSessionId = current
+            settings.channel = 'qq'
+            rememberSelected(binding.sessionId)
+            saveSettings()
+            writeJson(res, 200, { ok: true, value: await stateWithSessions() })
+            return
+          }
+          if (req.method === 'POST' && action === 'qq/disable') {
+            const binding = qqBinding(true)
+            settings.channel = 'auto'
+            saveSettings()
+            const rows = await listSessionOptions(true)
+            const previous = typeof settings.previousSessionId === 'string' ? settings.previousSessionId : ''
+            const fallback = rows.find((row) => row.sessionId !== binding.sessionId)
+            const wanted = rows.some((row) => row.sessionId === previous) && previous !== binding.sessionId
+              ? previous
+              : fallback
+                ? fallback.sessionId
+                : ''
+            if (wanted) rememberSelected(wanted)
+            writeJson(res, 200, { ok: true, value: await stateWithSessions() })
+            return
+          }
+          if (req.method === 'POST' && action === 'qq/test') {
+            const result = await qqSendText('【词汇复习】QQ 通道测试：看到这条说明复习题目可以直接推送到 QQ。')
+            state.qqLastSendAt = Date.now()
+            state.qqError = result.ok ? '' : result.error
+            saveLedger()
+            writeJson(res, 200, {
+              ok: result.ok,
+              error: result.ok ? undefined : { code: 'qq-send-failed', message: result.error },
+              value: { ...(await stateWithSessions()), qqTest: { ok: result.ok, error: result.error || '' } },
+            })
             return
           }
           if (req.method === 'POST' && action === 'interrupt') {

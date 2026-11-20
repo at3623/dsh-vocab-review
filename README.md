@@ -4,7 +4,7 @@ Underlined-word vocabulary review for DeepSeek Harness.
 
 ## Install
 
-Requires DeepSeek Harness 0.2.x, Node 22+, and no extra npm dependencies.
+Requires DeepSeek Harness 0.2.x, Node 22+, and no extra npm dependencies. The optional QQ channel needs `@hualiong/dsh-qq-bot` installed and bound to a session.
 
 **From GitHub** (once this repository is pushed):
 
@@ -22,6 +22,7 @@ The bundle patch inserts the `vocab-review` row; the Client half is discovered f
 - The worksheet image is **never read or stored by the plugin**; the chat model extracts the underlined words and calls `vocab_import` with plain text.
 - The plugin writes only two files under `<DSH_HOME>/vocab-review/`: `ledger.json` (words/queue/counters) and `settings.json` (limits, selected conversation, reminder bookkeeping).
 - The strong-pause Stop only touches the **selected** session: its Agent, its background jobs/terminals, and its child subagents — never other sessions.
+- The QQ channel only reads `<DSH_HOME>/integrations/dsh-qq-bot/state.json` (bound session id + last chat target) and delivers through the bot's own `send_qq_message` tool. It never reads the AppID/AppSecret and never opens a second QQ connection.
 
 ## What it does
 
@@ -98,6 +99,17 @@ The panel has a dropdown listing the user's existing DSH conversations (title on
 
 If the selected conversation is archived or deleted, the panel falls back to the first live conversation. Importing words from a different conversation stores the queue and waits for Start in the selected one (the import result says so).
 
+## QQ channel (dsh-qq-bot)
+
+When the official QQ bot plugin (`@hualiong/dsh-qq-bot`) has bound a session and its owner has messaged the bot once, the same review can run in the QQ chat:
+
+- The panel shows a QQ row: **Review on QQ** switches the selected conversation to the QQ-bound session and sets `channel: "qq"` in `settings.json`; **Back to web chat** returns to the previous conversation. Picking any conversation in the dropdown overrides a forced channel; picking the QQ-bound one re-enters QQ mode automatically under the default `auto` channel.
+- **Delivery is plugin-driven.** The plugin pushes `Q: {word}` to QQ through the bot's `send_qq_message` tool (`tools.get('send_qq_message')`), so no model turn is needed to carry a question. A next question waits for the graded answer's turn to end plus a 1.5 s head start, so the bot's reply is never overtaken.
+- **Answers stay model-graded.** The user replies in QQ; the bot prompts the bound session with `[QQ] …`; the model sees the QQ protocol section (QUEUE head = pending word, reply exactly one `✅/❌ {word} = {meaning}` line); the bot relays that line; the plugin records it from the same session event stream it already watches and queues the next question.
+- **Due reminders** are pushed to the same QQ chat, still capped by `reminderMaxPerDay` (default 1/day).
+- **Image upload is not part of the QQ bot's inbound path** (it accepts text only), so import the worksheet image from the Web chat or paste the word list in QQ. The ledger and schedule are shared either way.
+- If the bot is missing, unbound, or a send fails, the panel row reports it and the error is persisted as `qqError` in `ledger.json`. The state file location can be overridden with the `qqStatePath` plugin config.
+
 ## Stop (strong pause, req. 8)
 
 The Stop button sits next to Start/Resume and is enabled only while `turnInFlight` is true (the selected session's Agent has `status === 'running'`, polled every 2 s). It calls the same strong-pause sequence as `dsh-interrupt-button`:
@@ -113,7 +125,7 @@ It is silent: no prompt, no `steer`, no fake transcript message. Afterwards the 
 ## Verification
 
 - `npm test` — runs the three offline harnesses below.
-- `node test/harness.mjs` — Host harness: 3-word import, ✅/❌ ledger updates, compact injection, loop Pause (no prompt, queue kept), Start resume without double-counting, `dailyTotalLimit=5`, live settings edits, once-per-day reminder, date rollover, reload persistence.
+- `node test/harness.mjs` — Host harness: 3-word import, ✅/❌ ledger updates, compact injection, loop Pause (no prompt, queue kept), Start resume without double-counting, `dailyTotalLimit=5`, live settings edits, once-per-day reminder, date rollover, reload persistence, and the QQ channel (binding discovery, Start pushes `Q:` through `send_qq_message` without prompting the web session, QQ-graded answer recorded, next question pushed only after that turn ends).
 - `node test/sessions-stop.mjs` — conversation list (titles, archived/subagent excluded), selection persisted in `settings.json` + reload, Start routed to the selected session, strong-pause Stop (cancel + jobs/terminals/subagents, silent, `turnInFlight` false), idle Stop no-op, archived-selection fallback.
 - `node test/client-load-check.mjs` — evaluates the Client bundle with a mocked module loader and asserts the sidebar/main registrations.
 - `test/make_test_image.py` — regenerates the 3-underlined-word fixture (`pip install pillow`).

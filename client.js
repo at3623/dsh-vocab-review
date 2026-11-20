@@ -62,6 +62,15 @@ window.__ModuleLoader__.load({
       hint: 'Review happens in the chat: one word per turn. Stop ends the loop after the current turn; the queue is kept.',
       noSession: 'Open or create a chat session first.',
       restartReview: 'Restart review',
+      qqOn: 'QQ channel on',
+      qqReady: 'QQ channel available',
+      qqUnbound: 'QQ bot has no bound session',
+      qqMissing: 'QQ bot plugin not detected',
+      qqEnable: 'Review on QQ',
+      qqDisable: 'Back to web chat',
+      qqTest: 'Test push',
+      qqTestSent: 'Test message sent to QQ',
+      qqSending: 'Sending…',
     }
     const ZH = {
       title: '单词复习',
@@ -104,6 +113,15 @@ window.__ModuleLoader__.load({
       hint: '复习在对话里进行：每轮只问一个单词。停止会在当前轮结束后生效，队列保留。',
       noSession: '请先打开或创建一个对话。',
       restartReview: '重新开始复习',
+      qqOn: 'QQ 通道已开启',
+      qqReady: 'QQ 通道可用',
+      qqUnbound: 'QQ 机器人尚未绑定会话',
+      qqMissing: '未检测到 QQ 机器人插件',
+      qqEnable: '在 QQ 上复习',
+      qqDisable: '回到网页复习',
+      qqTest: '测试推送',
+      qqTestSent: '已向 QQ 发送测试消息',
+      qqSending: '发送中…',
     }
 
     let clientCtx = null
@@ -314,6 +332,14 @@ window.__ModuleLoader__.load({
 .vr-select-label { font-size: 12px; color: var(--dsw-alias-label-secondary); flex: none; }
 .vr-select { box-sizing: border-box; flex: 1 1 auto; min-width: 0; border: 1px solid var(--dsw-alias-border-l2); border-radius: 6px; background: var(--dsw-alias-bg-layer-1); color: var(--dsw-alias-label-primary); font: inherit; font-size: 13px; padding: 6px 8px; }
 .vr-select:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: 1px; }
+.vr-qq { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12px; color: var(--dsw-alias-label-secondary); }
+.vr-qq-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--dsw-alias-border-l2); flex: none; }
+.vr-qq-on .vr-qq-dot { background: var(--dsw-alias-brand-primary); }
+.vr-qq-text { flex: 1 1 auto; }
+.vr-qq-btn { appearance: none; border: 1px solid var(--dsw-alias-border-l2); background: transparent; color: var(--dsw-alias-label-primary); font: inherit; font-size: 12px; border-radius: 6px; padding: 3px 10px; cursor: pointer; }
+.vr-qq-btn:hover:not(:disabled) { background: var(--dsw-alias-bg-layer-2); }
+.vr-qq-btn:disabled { opacity: 0.55; cursor: default; }
+.vr-qq-note { font-size: 12px; color: var(--dsw-alias-label-secondary); }
 @media (max-width: 520px) { .vr-root { padding: calc(20px + var(--dsh-frame-top-clearance, 0px)) 14px 40px; } .vr-grid { grid-template-columns: 1fr; } }
 `
 
@@ -333,6 +359,8 @@ window.__ModuleLoader__.load({
       const [settingsDraft, setSettingsDraft] = React.useState(null)
       const [saving, setSaving] = React.useState(false)
       const [saved, setSaved] = React.useState(false)
+      const [qqBusy, setQqBusy] = React.useState(false)
+      const [qqNote, setQqNote] = React.useState('')
       useLocaleRevision()
       const t = clientCtx && clientCtx.locale ? clientCtx.locale.bind(NS) : (key) => key
 
@@ -354,7 +382,9 @@ window.__ModuleLoader__.load({
         api('start', { method: 'POST' })
           .then((value) => {
             publish(value)
-            if (value && value.sessionId && clientCtx && clientCtx.uiWorkspace) {
+            // In QQ mode the review belongs to the QQ chat; do not navigate the
+            // web UI into the bot's bound session.
+            if (value && value.sessionId && (!value.qq || !value.qq.mode) && clientCtx && clientCtx.uiWorkspace) {
               clientCtx.uiWorkspace.openSession(value.sessionId)
             }
           })
@@ -430,6 +460,27 @@ window.__ModuleLoader__.load({
           .finally(() => setSaving(false))
       }
 
+      const qqCall = (path) => {
+        if (qqBusy) return
+        setQqBusy(true)
+        setActionError('')
+        setQqNote('')
+        api(path, { method: 'POST' })
+          .then((value) => {
+            publish(value)
+            if (path === 'qq/test') {
+              const test = value && value.qqTest ? value.qqTest : null
+              if (test && test.ok) setQqNote(t('qqTestSent'))
+              else if (test && test.error) setActionError(test.error)
+            }
+          })
+          .catch((cause) => setActionError(String(cause && cause.message ? cause.message : cause)))
+          .finally(() => setQqBusy(false))
+      }
+
+      const toggleQq = () => qqCall(qq && qq.mode ? 'qq/disable' : 'qq/enable')
+      const testQq = () => qqCall('qq/test')
+
       const due = snapshot ? snapshot.dueToday : 0
       const wrong = snapshot ? snapshot.wrongCount : 0
       const total = snapshot ? snapshot.total : 0
@@ -443,6 +494,7 @@ window.__ModuleLoader__.load({
       const counters = snapshot && snapshot.counters ? snapshot.counters : { new: 0, review: 0, total: 0, minutes: 0 }
       const quota = snapshot ? snapshot.quota : null
       const reminder = snapshot ? snapshot.reminder : null
+      const qq = snapshot ? snapshot.qq : null
       const showReminder = reminder && reminder.dueCount > 0 && snapshot.dueNow > 0 && !running
 
       return h(
@@ -479,6 +531,34 @@ window.__ModuleLoader__.load({
                   ),
             ),
           ),
+          qq
+            ? h(
+                'div',
+                { className: `vr-qq${qq.mode ? ' vr-qq-on' : ''}` },
+                h('span', { className: 'vr-qq-dot', 'aria-hidden': 'true' }),
+                h(
+                  'span',
+                  { className: 'vr-qq-text' },
+                  qq.mode ? t('qqOn') : qq.available ? t('qqReady') : qq.bound ? t('qqUnbound') : t('qqMissing'),
+                ),
+                qq.available
+                  ? h(
+                      'button',
+                      { className: 'vr-qq-btn', type: 'button', onClick: toggleQq, disabled: qqBusy },
+                      qq.mode ? t('qqDisable') : t('qqEnable'),
+                    )
+                  : null,
+                qq.available
+                  ? h(
+                      'button',
+                      { className: 'vr-qq-btn', type: 'button', onClick: testQq, disabled: qqBusy },
+                      qqBusy ? t('qqSending') : t('qqTest'),
+                    )
+                  : null,
+              )
+            : null,
+          qq && qq.mode && qq.error ? h('div', { className: 'vr-error', role: 'alert' }, qq.error) : null,
+          qqNote ? h('div', { className: 'vr-qq-note' }, qqNote) : null,
           h(
             'div',
             { className: 'vr-stats', 'aria-live': 'polite' },

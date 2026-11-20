@@ -32,6 +32,7 @@ function makeCtx(sessionId = 'session-test', options = {}) {
   const routes = []
   const prompts = []
   const timerCallbacks = []
+  const qqPushes = []
   const actionLog = []
   const sessions = options.sessions || []
   const archived = options.archived || []
@@ -71,6 +72,21 @@ function makeCtx(sessionId = 'session-test', options = {}) {
         assert.equal(tools.has(definition.name), false, `duplicate tool ${definition.name}`)
         tools.set(definition.name, definition)
         return () => {}
+      },
+      // The QQ channel delivers through dsh-qq-bot's own tool; when the harness
+      // opts in, the send is captured instead of touching a real QQ chat.
+      get(name) {
+        if (name !== 'send_qq_message' || !options.qqSend) return undefined
+        return {
+          name,
+          description: '',
+          parameters: { type: 'object', properties: {} },
+          output: { schema: { type: 'string' }, render: () => [] },
+          async execute(args) {
+            qqPushes.push(String(args && args.text ? args.text : ''))
+            return '已推送到 QQ'
+          },
+        }
       },
     },
     webServer: {
@@ -155,7 +171,7 @@ function makeCtx(sessionId = 'session-test', options = {}) {
       this.status = 'idle'
     },
   }
-  return { ctx, agent, tools, sections, contexts, handlers, routes, prompts, timerCallbacks, actionLog }
+  return { ctx, agent, tools, sections, contexts, handlers, routes, prompts, timerCallbacks, actionLog, qqPushes }
 }
 
 function fire(env, event, session = { id: 'session-test' }) {
@@ -442,6 +458,50 @@ const history = JSON.parse(readFileSync(join(dataDir, 'ledger.json'), 'utf8'))
 assert.equal(history.words.abandon.correct, 1)
 assert.equal(history.words.benefit.errors, 1)
 console.log('PASS persistence: reload sees the same ledger, counters and loop state')
+
+// ── 11. QQ channel: plugin pushes questions, grades the QQ answer ────────
+const qqBindingSession = 'session-qq'
+const qqStatePath = join(root, 'qq-bot-state.json')
+writeFileSync(
+  qqStatePath,
+  JSON.stringify({
+    version: 1,
+    sessionId: qqBindingSession,
+    ownerOpenId: 'OWNER_OPENID',
+    target: { scope: 'c2c', targetId: 'OWNER_OPENID' },
+    seenMessageIds: [],
+  }),
+)
+const qqEnv = freshEnv(join(root, 'qq-ledger'), { qqStatePath }, {
+  sessionId: 'session-web',
+  sessions: [
+    { sessionId: 'session-web', updatedAt: Date.now(), projections: { values: { title: 'Web chat' } } },
+    { sessionId: qqBindingSession, updatedAt: Date.now(), projections: { values: { title: 'QQ chat' } } },
+  ],
+  qqSend: true,
+})
+await qqEnv.tools.get('vocab_import').execute({ words: 'abandon, benefit' }, { agent: qqEnv.agent })
+const qqStartState = await state(qqEnv)
+assert.equal(qqStartState.qq.available, true, 'QQ bot binding is detected from its state file')
+assert.equal(qqStartState.qq.mode, false, 'QQ channel stays off while a web chat is selected')
+await post(qqEnv, 'select', { sessionId: qqBindingSession })
+const qqSelectedState = await state(qqEnv)
+assert.equal(qqSelectedState.qq.mode, true, 'selecting the QQ-bound conversation enters QQ mode')
+assert.equal(qqEnv.qqPushes.length, 0, 'selecting a conversation alone pushes nothing')
+const qqStarted = await post(qqEnv, 'start')
+assert.equal(qqStarted.ok, true)
+await new Promise((resolve) => setTimeout(resolve, 120))
+assert.equal(qqEnv.prompts.length, 0, 'QQ mode never prompts the web session')
+assert.equal(qqEnv.qqPushes.length, 1, 'Start pushes exactly one question to QQ')
+assert.match(qqEnv.qqPushes[0], /^Q: (?:abandon|benefit)$/u)
+const pending = qqSelectedState.pendingWord || qqStartState.pendingWord
+fire(qqEnv, answerText(`✅ ${pending} = test meaning`), { id: qqBindingSession })
+fire(qqEnv, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } }, { id: qqBindingSession })
+await new Promise((resolve) => setTimeout(resolve, 1_800))
+assert.equal(qqEnv.qqPushes.length, 2, 'the next question is pushed after the graded answer turn ends')
+assert.match(qqEnv.qqPushes[1], /^Q: /u)
+assert.equal(loadLedger(join(root, 'qq-ledger')).words[pending].correct, 1, 'the QQ-graded answer is recorded')
+console.log('PASS QQ channel: binding discovered, Start pushes Q to QQ, QQ answer graded, next Q pushed after turn/end')
 
 rmSync(root, { recursive: true, force: true })
 console.log('\nALL CHECKS PASSED')
