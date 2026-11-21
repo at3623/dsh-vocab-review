@@ -74,6 +74,17 @@ window.__ModuleLoader__.load({
       idleDone: 'All due words reviewed',
       nextDue: 'next due',
       autoContinue: 'The loop keeps asking while words are due; it stops only when every due word is done or a daily limit is hit.',
+      weakWords: 'Weak words',
+      weakHint: 'Words you failed or only half knew, hardest first.',
+      noWeak: 'No weak words yet.',
+      wrongTimes: 'wrong',
+      fuzzyTimes: 'half',
+      markMastered: 'Known',
+      forgetWord: 'Ask again',
+      removeWord: 'Remove',
+      exportCsv: 'Export CSV',
+      verifyNote: 'Every ✅ is re-checked against the stored meaning; a different meaning counts as wrong.',
+      conflictLine: 'Plugin veto',
     }
     const ZH = {
       title: '单词复习',
@@ -128,6 +139,17 @@ window.__ModuleLoader__.load({
       idleDone: '今天到期的单词都已复习完',
       nextDue: '下一个到期',
       autoContinue: '只要还有到期的单词就会自动继续；全部复习完或达到每日上限时才停。',
+      weakWords: '薄弱词',
+      weakHint: '答错过或只记得一半的词，按错次排序。',
+      noWeak: '还没有薄弱词。',
+      wrongTimes: '错',
+      fuzzyTimes: '半',
+      markMastered: '已掌握',
+      forgetWord: '重问',
+      removeWord: '删除',
+      exportCsv: '导出 CSV',
+      verifyNote: '每个 ✅ 都会用已存词义二次校验，词义不符按错处理。',
+      conflictLine: '插件改判',
     }
 
     let clientCtx = null
@@ -324,6 +346,17 @@ window.__ModuleLoader__.load({
 .vr-count { color: var(--dsw-alias-state-error-primary); font-variant-numeric: tabular-nums; flex: none; }
 .vr-empty { color: var(--dsw-alias-label-secondary); font-size: 13px; }
 .vr-queue { font-size: 12px; color: var(--dsw-alias-label-secondary); overflow-wrap: anywhere; }
+.vr-weak-tools { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.vr-weak-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 5px; max-height: 260px; overflow: auto; }
+.vr-weak-row { display: flex; align-items: baseline; gap: 8px; font-size: 13px; }
+.vr-weak-word { font-weight: 600; flex: none; }
+.vr-weak-meaning { color: var(--dsw-alias-label-secondary); flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.vr-weak-meta { color: var(--dsw-alias-label-secondary); font-size: 12px; flex: none; font-variant-numeric: tabular-nums; }
+.vr-weak-actions { display: flex; gap: 4px; flex: none; }
+.vr-mini { appearance: none; border: 1px solid var(--dsw-alias-border-l2); background: transparent; color: var(--dsw-alias-label-secondary); font: inherit; font-size: 11px; border-radius: 5px; padding: 1px 6px; cursor: pointer; }
+.vr-mini:hover:not(:disabled) { color: var(--dsw-alias-label-primary); background: var(--dsw-alias-bg-layer-2); }
+.vr-mini:disabled { opacity: 0.5; cursor: default; }
+.vr-conflict { font-size: 12px; color: var(--dsw-alias-label-secondary); overflow-wrap: anywhere; }
 .vr-hint { font-size: 12px; color: var(--dsw-alias-label-secondary); }
 .vr-settings { border-top: 1px solid var(--dsw-alias-border-l1); padding-top: 14px; }
 .vr-settings summary { cursor: pointer; font-size: 12px; font-weight: 600; color: var(--dsw-alias-label-secondary); text-transform: uppercase; letter-spacing: 0.05em; }
@@ -373,6 +406,7 @@ window.__ModuleLoader__.load({
       const [saved, setSaved] = React.useState(false)
       const [qqBusy, setQqBusy] = React.useState(false)
       const [qqNote, setQqNote] = React.useState('')
+      const [wordBusy, setWordBusy] = React.useState('')
       useLocaleRevision()
       const t = clientCtx && clientCtx.locale ? clientCtx.locale.bind(NS) : (key) => key
 
@@ -493,6 +527,36 @@ window.__ModuleLoader__.load({
       const toggleQq = () => qqCall(qq && qq.mode ? 'qq/disable' : 'qq/enable')
       const testQq = () => qqCall('qq/test')
 
+      // Wrong-word book actions: master (known), forget (ask again now),
+      // remove (out of the ledger). All of them return a fresh snapshot.
+      const wordCall = (op, word) => {
+        if (wordBusy) return
+        setWordBusy(`${op}:${word}`)
+        setActionError('')
+        api(`words/${op}`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ word }),
+        })
+          .then(publish)
+          .catch((cause) => setActionError(String(cause && cause.message ? cause.message : cause)))
+          .finally(() => setWordBusy(''))
+      }
+
+      const exportWords = () => {
+        try {
+          const url = new URL(`${API}/export.csv?scope=weak`, document.baseURI).href
+          const link = document.createElement('a')
+          link.href = url
+          link.download = 'vocab-weak.csv'
+          document.body.appendChild(link)
+          link.click()
+          link.remove()
+        } catch (cause) {
+          setActionError(String(cause && cause.message ? cause.message : cause))
+        }
+      }
+
       const due = snapshot ? snapshot.dueToday : 0
       const wrong = snapshot ? snapshot.wrongCount : 0
       const total = snapshot ? snapshot.total : 0
@@ -502,7 +566,8 @@ window.__ModuleLoader__.load({
       const sessions = snapshot && Array.isArray(snapshot.sessions) ? snapshot.sessions : []
       const selectedSessionId = snapshot && typeof snapshot.selectedSessionId === 'string' ? snapshot.selectedSessionId : ''
       const queue = snapshot && Array.isArray(snapshot.queue) ? snapshot.queue : []
-      const recent = snapshot && Array.isArray(snapshot.recentErrors) ? snapshot.recentErrors : []
+      const weak = snapshot && Array.isArray(snapshot.weakWords) ? snapshot.weakWords : []
+      const lastConflict = snapshot ? snapshot.lastConflict : null
       const counters = snapshot && snapshot.counters ? snapshot.counters : { new: 0, review: 0, total: 0, minutes: 0 }
       const quota = snapshot ? snapshot.quota : null
       const idleReason = snapshot ? snapshot.idleReason : null
@@ -641,25 +706,64 @@ window.__ModuleLoader__.load({
             : h(
                 'div',
                 { className: 'vr-section' },
-                h('div', { className: 'vr-section-title' }, t('recentErrors')),
-                recent.length === 0
-                  ? h('div', { className: 'vr-empty' }, t('noErrors'))
+                h(
+                  'div',
+                  { className: 'vr-weak-tools' },
+                  h('div', { className: 'vr-section-title' }, `${t('weakWords')} · ${weak.length}`),
+                  h(
+                    'button',
+                    { className: 'vr-mini', type: 'button', onClick: exportWords, disabled: weak.length === 0 },
+                    t('exportCsv'),
+                  ),
+                ),
+                h('div', { className: 'vr-idle' }, t('weakHint')),
+                weak.length === 0
+                  ? h('div', { className: 'vr-empty' }, t('noWeak'))
                   : h(
                       'ul',
-                      { className: 'vr-list' },
-                      recent.map((item) =>
+                      { className: 'vr-weak-list' },
+                      weak.map((item) =>
                         h(
                           'li',
-                          { className: 'vr-row', key: item.word },
-                          h('span', { className: 'vr-word' }, item.word),
-                          h('span', { className: 'vr-meaning' }, item.meaning || '—'),
-                          h('span', { className: 'vr-count' }, `×${item.errors}`),
+                          { className: 'vr-weak-row', key: item.word },
+                          h('span', { className: 'vr-weak-word' }, item.word),
+                          h('span', { className: 'vr-weak-meaning' }, item.meaning || '—'),
+                          h(
+                            'span',
+                            { className: 'vr-weak-meta' },
+                            `${item.errors > 0 ? `${item.errors} ${t('wrongTimes')}` : ''}${item.errors > 0 && item.fuzzy > 0 ? ' · ' : ''}${item.fuzzy > 0 ? `${item.fuzzy} ${t('fuzzyTimes')}` : ''}`,
+                          ),
+                          h(
+                            'span',
+                            { className: 'vr-weak-actions' },
+                            h(
+                              'button',
+                              { className: 'vr-mini', type: 'button', onClick: () => wordCall('master', item.word), disabled: Boolean(wordBusy) },
+                              t('markMastered'),
+                            ),
+                            h(
+                              'button',
+                              { className: 'vr-mini', type: 'button', onClick: () => wordCall('forget', item.word), disabled: Boolean(wordBusy) },
+                              t('forgetWord'),
+                            ),
+                            h(
+                              'button',
+                              { className: 'vr-mini', type: 'button', onClick: () => wordCall('remove', item.word), disabled: Boolean(wordBusy) },
+                              t('removeWord'),
+                            ),
+                          ),
                         ),
                       ),
                     ),
-                queue.length > 0
-                  ? h('div', { className: 'vr-queue' }, `${t('queue')}: ${queue.join(', ')}`)
+                queue.length > 0 ? h('div', { className: 'vr-queue' }, `${t('queue')}: ${queue.join(', ')}`) : null,
+                lastConflict
+                  ? h(
+                      'div',
+                      { className: 'vr-conflict' },
+                      `${t('conflictLine')}: ${lastConflict.word} · ${lastConflict.answer || '—'} → ${lastConflict.expected || '—'}`,
+                    )
                   : null,
+                h('div', { className: 'vr-hint' }, t('verifyNote')),
               ),
           h(
             'details',

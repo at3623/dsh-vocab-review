@@ -6,6 +6,10 @@
 # Daily limits default to 0 = unlimited for the total/minutes caps; the per-type
 # defaults cap runaway review days. All of them (and reminderMaxPerDay) are also
 # editable at runtime from the sidebar panel and stored in settings.json.
+#
+# verifyAnswers: the plugin re-checks every model ✅ against the meaning it
+# stored for that word and schedules a mismatch as wrong. Set it to false to
+# trust the model's grading alone (the pre-1.4 behaviour).
 - insert:
     - id: vocab-review
       name: dsh-vocab-review
@@ -14,6 +18,7 @@
         autoContinue: true
         wrongInject: 2
         retryDelayMinutes: 5
+        verifyAnswers: true
         ladderMinutes: [30, 180, 720, 2880, 10080, 43200]
         highMultiplier: 0.7
         lowMultiplier: 1.6

@@ -182,6 +182,16 @@ function answerText(text) {
   return { type: 'assistant/message', data: { message: { role: 'assistant', content: [{ type: 'text', text }] } } }
 }
 
+function userText(text, session = { id: 'session-test' }) {
+  return { type: 'user/message', data: { role: 'user', content: [{ type: 'text', text }] } }
+}
+
+function fireUser(env, text, session = { id: 'session-test' }) {
+  fire(env, userText(text), session)
+}
+
+const settle = () => new Promise((resolve) => setTimeout(resolve, 20))
+
 function callRoute(env, method, path, body) {
   const route = env.routes.find((candidate) => candidate.path === '/api/dsh-vocab-review')
   assert.ok(route, 'API route is registered')
@@ -197,15 +207,20 @@ function callRoute(env, method, path, body) {
     }
     const res = {
       status: 0,
-      writeHead(status) {
+      headers: {},
+      writeHead(status, headers) {
         this.status = status
+        this.headers = headers || {}
       },
       end(raw) {
+        this.raw = raw
+        let body = null
         try {
-          resolve({ status: this.status, body: JSON.parse(raw) })
-        } catch (error) {
-          reject(error)
+          body = JSON.parse(raw)
+        } catch {
+          body = raw
         }
+        resolve({ status: this.status, body, headers: this.headers })
       },
     }
     Promise.resolve(route.handler(req, res)).catch(reject)
@@ -553,6 +568,175 @@ assert.equal(qqIdleLedger.idleReason.kind, 'no-due')
 assert.equal(qqIdleEnv.qqPushes.length, 2, 'QQ gets one message explaining why review stopped')
 assert.match(qqIdleEnv.qqPushes[1], /复习完/u)
 console.log('PASS QQ idle: an automatic stop pushes one explanation to QQ instead of going silent')
+
+// ── 14. Plugin veto: ✅ with a different meaning is scheduled as wrong ────
+const vetoDir = join(root, 'veto')
+const vetoEnv = freshEnv(vetoDir)
+await vetoEnv.tools.get('vocab_import').execute({ words: 'abandon' }, { agent: vetoEnv.agent })
+fireUser(vetoEnv, '放弃')
+fire(vetoEnv, answerText('✅ abandon = 放弃'))
+await settle()
+let vetoLedger = loadLedger(vetoDir)
+assert.equal(vetoLedger.words.abandon.correct, 1)
+assert.equal(vetoLedger.words.abandon.meaning, '放弃')
+// Make the word due again without waiting for the real interval.
+vetoLedger.words.abandon.dueAt = Date.now() - 1_000
+vetoLedger.words.abandon.lastResultAt = Date.now() - 5_000
+writeFileSync(join(vetoDir, 'ledger.json'), JSON.stringify(vetoLedger))
+const vetoEnv2 = freshEnv(vetoDir)
+assert.equal((await post(vetoEnv2, 'start')).ok, true)
+fireUser(vetoEnv2, '得到')
+fire(vetoEnv2, answerText('✅ abandon = 放弃'))
+await settle()
+const vetoAfter = loadLedger(vetoDir)
+assert.equal(vetoAfter.words.abandon.errors, 1, 'a conflicting answer is wrong even when the model said ✅')
+assert.equal(vetoAfter.words.abandon.correct, 1, 'the earlier correct answer is untouched')
+assert.equal(vetoAfter.words.abandon.stage, 0, 'a veto resets the ladder like a real mistake')
+assert.ok(vetoAfter.lastConflict && vetoAfter.lastConflict.word === 'abandon')
+assert.match(vetoAfter.lastConflict.answer, /得到/u)
+assert.match(vetoAfter.lastConflict.expected, /放弃/u)
+console.log('PASS veto: model ✅ with a different meaning is recorded as wrong and reported as lastConflict')
+
+// ── 15. Fuzzy tier: hedging downgrades ✅, half interval, stage kept ──────
+const fuzzyDir = join(root, 'fuzzy')
+const fuzzyEnv = freshEnv(fuzzyDir)
+await fuzzyEnv.tools.get('vocab_import').execute({ words: 'cautious' }, { agent: fuzzyEnv.agent })
+fireUser(fuzzyEnv, '好像 谨慎的')
+fire(fuzzyEnv, answerText('✅ cautious = 谨慎的'))
+await settle()
+const fuzzyLedger = loadLedger(fuzzyDir)
+assert.equal(fuzzyLedger.words.cautious.fuzzy, 1)
+assert.equal(fuzzyLedger.words.cautious.correct, 0)
+assert.equal(fuzzyLedger.words.cautious.errors, 0)
+assert.equal(fuzzyLedger.words.cautious.stage, 0, 'fuzzy does not advance the ladder')
+const fuzzyDueIn = fuzzyLedger.words.cautious.dueAt - Date.now()
+assert.ok(fuzzyDueIn > 14 * 60_000 && fuzzyDueIn < 16 * 60_000, `fuzzy returns at half of 30m, got ${Math.round(fuzzyDueIn / 60_000)}m`)
+console.log('PASS fuzzy: a hedged answer is neither correct nor wrong; half interval, stage kept')
+
+// ── 16. Explicit 🤔 line, then a real ✅ advances the ladder ─────────────
+const halfDir = join(root, 'half')
+const halfEnv = freshEnv(halfDir)
+await halfEnv.tools.get('vocab_import').execute({ words: 'benefit' }, { agent: halfEnv.agent })
+fire(halfEnv, answerText('🤔 benefit = 好处'))
+await settle()
+let halfLedger = loadLedger(halfDir)
+assert.equal(halfLedger.words.benefit.fuzzy, 1)
+assert.equal(halfLedger.words.benefit.meaning, '好处')
+assert.equal(halfLedger.words.benefit.stage, 0)
+halfLedger.words.benefit.dueAt = Date.now() - 1_000
+halfLedger.words.benefit.lastResultAt = Date.now() - 5_000
+writeFileSync(join(halfDir, 'ledger.json'), JSON.stringify(halfLedger))
+const halfEnv2 = freshEnv(halfDir)
+assert.equal((await post(halfEnv2, 'start')).ok, true)
+fireUser(halfEnv2, '好处')
+fire(halfEnv2, answerText('✅ benefit = 好处'))
+await settle()
+halfLedger = loadLedger(halfDir)
+assert.equal(halfLedger.words.benefit.correct, 1)
+assert.equal(halfLedger.words.benefit.stage, 1, 'a matching ✅ advances the ladder after a fuzzy')
+assert.ok(halfLedger.words.benefit.dueAt > Date.now() + 60 * 60_000)
+assert.equal(halfLedger.lastConflict, null, 'a matching answer never creates a veto')
+console.log('PASS half-step: 🤔 is recorded as fuzzy, the following matching ✅ advances the ladder')
+
+// ── 17. Weak-word book: state, master / forget / remove, CSV export ──────
+const bookDir = join(root, 'book')
+const bookEnv = freshEnv(bookDir)
+await bookEnv.tools.get('vocab_import').execute({ words: 'abandon, benefit, cautious' }, { agent: bookEnv.agent })
+fireUser(bookEnv, '不知道')
+fire(bookEnv, answerText('❌ abandon = 放弃'))
+await settle()
+fireUser(bookEnv, '好像 好处')
+fire(bookEnv, answerText('✅ benefit = 好处'))
+await settle()
+fireUser(bookEnv, '谨慎的')
+fire(bookEnv, answerText('✅ cautious = 谨慎的'))
+await settle()
+const bookState = await state(bookEnv)
+assert.equal(bookState.total, 3)
+assert.equal(bookState.wrongCount, 1)
+assert.equal(bookState.fuzzyCount, 1)
+assert.equal(bookState.verifyAnswers, true)
+assert.equal(bookState.weakWords.length, 2, 'only failed/half-known words are in the book')
+const abandonedRow = bookState.weakWords.find((row) => row.word === 'abandon')
+const benefitRow = bookState.weakWords.find((row) => row.word === 'benefit')
+assert.equal(abandonedRow.errors, 1)
+assert.equal(benefitRow.fuzzy, 1)
+assert.equal(bookState.weakWords.some((row) => row.word === 'cautious'), false)
+// master: leaves the book, scheduled at the top of the ladder
+const mastered = await post(bookEnv, 'words/master', { word: 'abandon' })
+assert.equal(mastered.ok, true)
+assert.equal(mastered.value.weakWords.some((row) => row.word === 'abandon'), false)
+const masteredLedger = loadLedger(bookDir)
+assert.equal(masteredLedger.words.abandon.errors, 0)
+assert.ok(masteredLedger.words.abandon.dueAt > Date.now() + 7 * 24 * 60 * 60_000, 'mastered word is scheduled far out')
+// forget: due right now again
+const forgotten = await post(bookEnv, 'words/forget', { word: 'benefit' })
+assert.equal(forgotten.ok, true)
+assert.ok(loadLedger(bookDir).words.benefit.dueAt <= Date.now() + 1_000)
+// remove: gone from the ledger
+const removed = await post(bookEnv, 'words/remove', { word: 'cautious' })
+assert.equal(removed.ok, true)
+assert.equal((await state(bookEnv)).total, 2)
+assert.equal((await state(bookEnv)).weakWords.some((row) => row.word === 'cautious'), false)
+// CSV export (BOM + header + rows, all words)
+const csvResponse = await callRoute(bookEnv, 'GET', '/api/dsh-vocab-review/export.csv?scope=all')
+assert.equal(csvResponse.status, 200)
+assert.equal(csvResponse.headers['content-type'], 'text/csv; charset=utf-8')
+assert.ok(String(csvResponse.body).startsWith('\uFEFFword,meaning,errors,fuzzy,stage,correct,due_at,last_result_at'))
+assert.ok(String(csvResponse.body).includes('benefit'))
+assert.ok(String(csvResponse.body).includes('好处'))
+assert.ok(!String(csvResponse.body).includes('cautious'))
+const weakCsv = await callRoute(bookEnv, 'GET', '/api/dsh-vocab-review/export.csv?scope=weak')
+assert.ok(String(weakCsv.body).includes('benefit'))
+console.log('PASS weak-word book: state lists failed/half words, master/forget/remove work, CSV exports with BOM')
+
+// ── 18. A newer ledger schema is set aside instead of misread ────────────
+const futureDir = join(root, 'future')
+mkdirSync(futureDir, { recursive: true })
+writeFileSync(
+  join(futureDir, 'ledger.json'),
+  JSON.stringify({ version: 9, plugin: 'dsh-vocab-review', words: { ghost: { word: 'ghost' } } }),
+)
+const futureEnv = freshEnv(futureDir)
+const futureState = await state(futureEnv)
+assert.equal(futureState.total, 0, 'words from an unknown schema are not loaded')
+assert.ok(existsSync(join(futureDir, 'ledger.json.v9.bak')), 'the newer ledger is kept as a .bak file')
+console.log('PASS schema guard: a future ledger version is moved to .bak and a clean state is used')
+
+// ── 19. "不知道" is wrong even when the model grades it ✅ ────────────────
+const dontDir = join(root, 'dont-know')
+const dontEnv = freshEnv(dontDir)
+await dontEnv.tools.get('vocab_import').execute({ words: 'doubt' }, { agent: dontEnv.agent })
+fireUser(dontEnv, '不知道')
+fire(dontEnv, answerText('✅ doubt = 怀疑'))
+await settle()
+const dontLedger = loadLedger(dontDir)
+assert.equal(dontLedger.words.doubt.errors, 1)
+assert.equal(dontLedger.words.doubt.correct, 0)
+assert.equal(dontLedger.words.doubt.stage, 0)
+console.log('PASS don\'t-know: an explicit 不知道 is always wrong, whatever the model says')
+
+// ── 20. A short partial Chinese answer is not vetoed ────────────────────
+const partDir = join(root, 'partial')
+const partEnv = freshEnv(partDir)
+await partEnv.tools.get('vocab_import').execute({ words: 'genuine' }, { agent: partEnv.agent })
+fireUser(partEnv, '真正的')
+fire(partEnv, answerText('✅ genuine = 真正的；真诚的'))
+await settle()
+const partLedger = loadLedger(partDir)
+partLedger.words.genuine.dueAt = Date.now() - 1_000
+partLedger.words.genuine.lastResultAt = Date.now() - 5_000
+writeFileSync(join(partDir, 'ledger.json'), JSON.stringify(partLedger))
+const partEnv2 = freshEnv(partDir)
+assert.equal((await post(partEnv2, 'start')).ok, true)
+fireUser(partEnv2, '真的')
+fire(partEnv2, answerText('✅ genuine = 真正的；真诚的'))
+await settle()
+const partAfter = loadLedger(partDir)
+assert.equal(partAfter.words.genuine.correct, 2, 'a different wording of the same gloss is still correct')
+assert.equal(partAfter.words.genuine.errors, 0)
+assert.equal(partAfter.lastConflict, null)
+console.log('PASS partial: a short Chinese rewording of the stored gloss is not vetoed')
 
 rmSync(root, { recursive: true, force: true })
 console.log('\nALL CHECKS PASSED')

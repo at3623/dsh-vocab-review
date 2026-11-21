@@ -25,6 +25,9 @@ const PLUGIN = 'dsh-vocab-review'
 const API_PREFIX = '/api/dsh-vocab-review'
 const REMINDER_TICK_MS = 60_000
 const REMINDER_MIN_GAP_MS = 3 * 60 * 60_000
+// Bumping this makes a ledger from a newer plugin schema be set aside instead
+// of being silently read with the wrong assumptions.
+const SCHEMA_VERSION = 2
 
 const DEFAULTS = {
   // Words held in the queue at once. `autoContinue` keeps the loop alive after
@@ -33,6 +36,10 @@ const DEFAULTS = {
   autoContinue: true,
   wrongInject: 2,
   retryDelayMinutes: 5,
+  // The plugin re-checks a model `✅` against the meaning it stored last time.
+  // A mismatch is scheduled as wrong: the model alone must not decide that a
+  // different meaning is an acceptable answer.
+  verifyAnswers: true,
   ladderMinutes: [30, 180, 720, 2880, 10080, 43200], // 30m, 3h, 12h, 2d, 7d, 30d
   highMultiplier: 0.7,
   lowMultiplier: 1.6,
@@ -113,6 +120,7 @@ function resolveConfig(config) {
     autoContinue: raw.autoContinue === false ? false : DEFAULTS.autoContinue,
     wrongInject: clampInt(raw.wrongInject, 0, 10, DEFAULTS.wrongInject),
     retryDelayMinutes: clampNum(raw.retryDelayMinutes, 0.1, 1440, DEFAULTS.retryDelayMinutes),
+    verifyAnswers: raw.verifyAnswers === false ? false : DEFAULTS.verifyAnswers,
     ladderMinutes: ladder.length > 0 ? ladder : DEFAULTS.ladderMinutes.slice(),
     highMultiplier: clampNum(raw.highMultiplier, 0.1, 3, DEFAULTS.highMultiplier),
     lowMultiplier: clampNum(raw.lowMultiplier, 0.5, 5, DEFAULTS.lowMultiplier),
@@ -141,6 +149,47 @@ function normalizeWord(raw) {
     .replace(/[»"'“”‘’()）.。,，;；:：!！?？]+$/, '')
     .trim()
     .toLowerCase()
+}
+
+// ── Answer text comparison ────────────────────────────────────────────────
+// Meanings arrive from the model as short Chinese (or English) glosses. They
+// are compared loosely: case, spaces and punctuation are dropped, a gloss may
+// list alternatives ("放弃；抛弃"), and a partial answer ("放弃吧") counts.
+function squashText(raw) {
+  return String(raw === undefined || raw === null ? '' : raw)
+    .toLowerCase()
+    .replace(/\[qq\]/gi, ' ')
+    .replace(/[\s\u3000，,。.、；;：:！!？?“”"'‘’《》()（）[\]【】<>~\-—_/\\|]+/gu, '')
+}
+
+function meaningTokens(meaning) {
+  return String(meaning === undefined || meaning === null ? '' : meaning)
+    .split(/[\s\u3000,，、；;：:/|（）()【】[\]《》]+/u)
+    .map((token) => squashText(token))
+    .filter((token) => token.length >= 2)
+}
+
+/** The user hedged ("好像…", "不确定"), which means "recognised, not solid". */
+const UNCERTAIN_ANSWER = /(不确定|不清楚|拿不准|记不清|记不太清|记不稳|有点模糊|模糊|好像|似乎|大概是|可能是|猜的|蒙的|maybe|not\s*sure|unsure|guess)/i
+/** The user openly did not know: the model must not grade this as correct. */
+const NOT_ANSWERED = /^(?:忘了|忘记了|忘了怎么说|不知道|不会|想不起来|不记得|没记住|no\s*idea|don'?t\s*know|idk)[\s!！。.]*$/i
+/** Chat control phrases that are not answers to the pending word. */
+const CONTROL_ANSWER = /^(?:开始|继续|停止|暂停|统计|状态|查看|导出|开始背单词|开始复习|继续复习|停止复习)[^\s]{0,12}$/i
+
+// Short Chinese answers are often a different wording of the same gloss
+// ("真的" for "真正的；真诚的"). Accept when every meaningful character of the
+// answer already appears in the gloss; particles are ignored because they carry
+// no meaning on their own.
+const SHORT_ANSWER_IGNORE = new Set(['的', '地', '得', '了', '着', '儿', '吧', '呢', '啊', '是', '很', '个', '一'])
+
+function shortAnswerSubset(answer, target) {
+  if (answer.length > 4 || !/[\u4e00-\u9fff]/u.test(answer)) return false
+  const chars = new Set([...target])
+  for (const char of answer) {
+    if (SHORT_ANSWER_IGNORE.has(char)) continue
+    if (!chars.has(char)) return false
+  }
+  return true
 }
 
 function splitWords(raw) {
@@ -272,6 +321,7 @@ export function apply(ctx, config) {
       reminderDueCount: 0,
       qqLastSendAt: null,
       qqError: '',
+      lastConflict: null,
       words: {},
     }
   }
@@ -282,6 +332,9 @@ export function apply(ctx, config) {
       word: typeof value.word === 'string' && value.word ? value.word : key,
       display: typeof value.display === 'string' && value.display ? value.display : key,
       meaning: typeof value.meaning === 'string' ? value.meaning : '',
+      meanings: Array.isArray(value.meanings)
+        ? value.meanings.filter((item) => typeof item === 'string' && item).slice(-4)
+        : [],
       freq: value.freq === 'high' || value.freq === 'low' || value.freq === 'normal' ? value.freq : 'normal',
       stage: Math.min(stage, cfg.ladderMinutes.length - 1),
       dueAt: Number.isFinite(value.dueAt) ? value.dueAt : Date.now(),
@@ -289,8 +342,10 @@ export function apply(ctx, config) {
       lastAskedAt: Number.isFinite(value.lastAskedAt) ? value.lastAskedAt : null,
       lastResultAt: Number.isFinite(value.lastResultAt) ? value.lastResultAt : null,
       lastErrorAt: Number.isFinite(value.lastErrorAt) ? value.lastErrorAt : null,
+      lastFuzzyAt: Number.isFinite(value.lastFuzzyAt) ? value.lastFuzzyAt : null,
       correct: Number.isFinite(value.correct) ? value.correct : 0,
       errors: Number.isFinite(value.errors) ? value.errors : 0,
+      fuzzy: Number.isFinite(value.fuzzy) ? value.fuzzy : 0,
     }
   }
 
@@ -300,6 +355,20 @@ export function apply(ctx, config) {
       const parsed = JSON.parse(readFileSync(ledgerPath, 'utf8'))
       const next = freshState()
       if (!parsed || typeof parsed !== 'object') return next
+      if (Number.isFinite(parsed.version) && parsed.version > SCHEMA_VERSION) {
+        // A newer plugin wrote this ledger. Keep the words safe by moving the
+        // file aside; the running plugin starts from an empty but valid state
+        // instead of dropping fields it does not understand.
+        try {
+          renameSync(ledgerPath, `${ledgerPath}.v${parsed.version}.bak`)
+        } catch {
+          /* rename may fail if another process holds the file */
+        }
+        ctx.logger?.warn?.(
+          `${PLUGIN}: ledger schema v${parsed.version} is newer than v${SCHEMA_VERSION}; moved it aside and started empty`,
+        )
+        return next
+      }
       if (typeof parsed.activeSessionId === 'string') next.activeSessionId = parsed.activeSessionId
       if (Array.isArray(parsed.queue)) next.queue = parsed.queue.filter((word) => typeof word === 'string')
       if (Number.isFinite(parsed.queueCreatedAt)) next.queueCreatedAt = parsed.queueCreatedAt
@@ -337,6 +406,14 @@ export function apply(ctx, config) {
         if (Number.isFinite(parsed.reminderDueCount)) next.reminderDueCount = parsed.reminderDueCount
         if (Number.isFinite(parsed.qqLastSendAt)) next.qqLastSendAt = parsed.qqLastSendAt
         if (typeof parsed.qqError === 'string') next.qqError = parsed.qqError
+        if (parsed.lastConflict && typeof parsed.lastConflict === 'object' && typeof parsed.lastConflict.word === 'string') {
+          next.lastConflict = {
+            word: parsed.lastConflict.word,
+            at: Number.isFinite(parsed.lastConflict.at) ? parsed.lastConflict.at : Date.now(),
+            answer: typeof parsed.lastConflict.answer === 'string' ? parsed.lastConflict.answer : '',
+            expected: typeof parsed.lastConflict.expected === 'string' ? parsed.lastConflict.expected : '',
+          }
+        }
       } else {
         // v1 upgrade: an old "mode: review" queue becomes a stopped loop so the
         // plugin never starts asking questions on its own after an upgrade.
@@ -764,6 +841,15 @@ export function apply(ctx, config) {
     return Math.max(60_000, Math.round(minutes * 60_000))
   }
 
+  // "Fuzzy" is a half step: the word stays where it is on the ladder but comes
+  // back at half the current interval (never sooner than the wrong-answer
+  // retry delay, never later than the interval itself).
+  function fuzzyIntervalOf(word) {
+    const half = Math.round(intervalOf(word) / 2)
+    const floor = Math.round(cfg.retryDelayMinutes * 60_000)
+    return Math.min(Math.max(floor, half), intervalOf(word))
+  }
+
   // `dueOnly` is the continuous mode: it only ever takes words that are due
   // right now, so an auto-continued loop stops instead of asking a word far
   // ahead of its schedule.
@@ -942,15 +1028,99 @@ export function apply(ctx, config) {
     saveLedger()
   }
 
-  function recordAnswer(key, correct, meaning, sessionId) {
+  // ── The user's own answer, kept for the plugin-side verdict check ────────
+  // The model prints the grade line, but it does not get the last word: the
+  // pending word's stored meaning is compared with what the user actually
+  // typed. The last user message is kept in memory only; a fresh process has
+  // no answer to re-check.
+  let lastUserMessage = { text: '', at: 0, sessionId: '' }
+
+  function rememberUserText(text, sessionId) {
+    lastUserMessage = {
+      text: typeof text === 'string' ? text : '',
+      at: Date.now(),
+      sessionId: typeof sessionId === 'string' ? sessionId : '',
+    }
+  }
+
+  function takeUserAnswer(sessionId) {
+    if (!lastUserMessage.text) return null
+    if (Date.now() - lastUserMessage.at > 5 * 60_000) return null
+    if (sessionId && lastUserMessage.sessionId && sessionId !== lastUserMessage.sessionId) return null
+    const text = lastUserMessage.text.replace(/^\s*\[qq\]\s*/i, '').trim()
+    if (!text) return null
+    if (text === cfg.startPrompt || text === cfg.continuePrompt) return null
+    if (STOP_WORDS.test(text) || CONTROL_ANSWER.test(text)) return null
+    return text
+  }
+
+  // A stored meaning is a short gloss, possibly listing alternatives. Compare
+  // loosely: punctuation/case dropped, any gloss accepted, partial answer ok.
+  function answerMatchesStored(answerText, word) {
+    const bank = [word.meaning, ...(Array.isArray(word.meanings) ? word.meanings : [])].filter(Boolean)
+    if (bank.length === 0) return true // no reference yet: the first answer defines it
+    const answer = squashText(answerText)
+    if (answer.length < 2) return true // too short to judge ("嗯", "嗯…")
+    for (const meaning of bank) {
+      const target = squashText(meaning)
+      if (!target) continue
+      if (target === answer || target.includes(answer) || answer.includes(target)) return true
+      for (const token of meaningTokens(meaning)) {
+        if (answer.includes(token) || token.includes(answer)) return true
+      }
+      if (shortAnswerSubset(answer, target)) return true
+    }
+    return false
+  }
+
+  // Three outcomes: correct / fuzzy (recognised, not solid) / wrong. The model
+  // proposes one; the plugin may only downgrade it, never upgrade an explicit
+  // ❌ into a ✅.
+  function gradeAnswer(key, modelVerdict, meaning, sessionId) {
+    const word = state.words[key]
+    if (!word) return false
+    const answerText = takeUserAnswer(sessionId) || ''
+    let verdict = modelVerdict
+    if (verdict === 'correct' && answerText) {
+      if (NOT_ANSWERED.test(answerText.trim())) {
+        verdict = 'wrong'
+      } else if (cfg.verifyAnswers && !answerMatchesStored(answerText, word)) {
+        verdict = 'wrong'
+        state.lastConflict = {
+          word: key,
+          at: Date.now(),
+          answer: answerText.slice(0, 80),
+          expected: [word.meaning, ...(word.meanings || [])].filter(Boolean).join(' / ').slice(0, 80),
+        }
+      } else if (UNCERTAIN_ANSWER.test(answerText)) {
+        verdict = 'fuzzy'
+      }
+    }
+    return recordAnswer(key, verdict, meaning, sessionId)
+  }
+
+  function recordAnswer(key, verdict, meaning, sessionId) {
     const word = state.words[key]
     if (!word) return false
     const now = Date.now()
     if (word.lastResultAt !== null && now - word.lastResultAt < 1500) return false
     const cleanMeaning = typeof meaning === 'string' ? meaning.trim().replace(/^[=:：\-–—\s]+/, '').slice(0, 120) : ''
-    if (cleanMeaning) word.meaning = cleanMeaning
+    if (cleanMeaning) {
+      // Keep the previous gloss as an accepted alternative ("放弃" / "抛弃").
+      if (word.meaning && word.meaning !== cleanMeaning) {
+        const bank = Array.isArray(word.meanings) ? word.meanings.filter((item) => item !== cleanMeaning) : []
+        word.meanings = [...bank, word.meaning].slice(-4)
+      }
+      word.meaning = cleanMeaning
+    }
     word.lastResultAt = now
-    if (correct) {
+    if (verdict === 'fuzzy') {
+      // Same stage, half the interval: it returns soon without being thrown
+      // back to step one like a real mistake.
+      word.fuzzy += 1
+      word.lastFuzzyAt = now
+      word.dueAt = now + fuzzyIntervalOf(word)
+    } else if (verdict === 'correct') {
       word.correct += 1
       word.stage = Math.min(word.stage + 1, cfg.ladderMinutes.length - 1)
       word.dueAt = now + intervalOf(word)
@@ -988,6 +1158,7 @@ export function apply(ctx, config) {
         word: item.word,
         display: item.word,
         meaning: '',
+        meanings: [],
         freq: classifyFrequency(item.word, item.freq),
         stage: 0,
         dueAt: now,
@@ -995,8 +1166,10 @@ export function apply(ctx, config) {
         lastAskedAt: null,
         lastResultAt: null,
         lastErrorAt: null,
+        lastFuzzyAt: null,
         correct: 0,
         errors: 0,
+        fuzzy: 0,
       }
     }
     const keys = []
@@ -1038,7 +1211,8 @@ export function apply(ctx, config) {
     '[Vocabulary review is ACTIVE]',
     'Output protocol — follow it strictly, with no explanations, encouragement, tables, or extra lines:',
     '1. The injected context lists QUEUE (its first word is the current question) and DUE. Ask one word per turn, exactly one line: `Q: {word}`. Always use the FIRST word of QUEUE.',
-    '2. When the user replies to your `Q:` line with an answer, judge it and reply with exactly one line: `✅ {word} = {meaning}` or `❌ {word} = {meaning}`. Keep the meaning short (Chinese is fine). Never add anything after that line.',
+    '2. When the user replies to your `Q:` line with an answer, judge it and reply with exactly one line, choosing exactly one of three gradings: `✅ {word} = {meaning}` (correct), `🤔 {word} = {meaning}` (right, but the user hedged/asked back/only gave part of the meaning), `❌ {word} = {meaning}` (wrong, "不知道", or no answer). Keep the meaning short (Chinese is fine). Never add anything after that line.',
+    '2a. The plugin re-checks every ✅ against the meaning it stored; a different meaning is scheduled as wrong even if you accepted it. Grade strictly, do not be encouraging.',
     '3. The plugin then sends the continuation "继续复习" automatically. On that continuation your next message must be the next question `Q: {word}` — it is not an answer to grade.',
     '4. The plugin records and schedules everything. Never calculate due words, error counts, quota, or scheduling yourself; use only the injected QUEUE.',
     '5. If the user asks to stop, call vocab_stop. Stop is handled by the plugin, not by you.',
@@ -1050,7 +1224,8 @@ export function apply(ctx, config) {
     '[Vocabulary review is ACTIVE — QQ channel]',
     'The plugin sends every `Q: {word}` line to QQ directly. Follow this strictly:',
     '1. Never print a `Q:` line on your own — except when a tool result explicitly says "Ask only the first word now: Q: {word}". In that single case reply with exactly that one line.',
-    '2. A user message that starts with `[QQ]` is the user answering the pending word — the injected PENDING/QUEUE-first word. Judge it and reply with exactly one line: `✅ {word} = {meaning}` or `❌ {word} = {meaning}` (short meaning, Chinese is fine). The QQ bot relays this line to the user — add nothing else.',
+    '2. A user message that starts with `[QQ]` is the user answering the pending word — the injected PENDING/QUEUE-first word. Judge it and reply with exactly one line, choosing exactly one of three gradings: `✅ {word} = {meaning}` (correct), `🤔 {word} = {meaning}` (right, but the user hedged/asked back/only gave part of the meaning), `❌ {word} = {meaning}` (wrong, "不知道", or no answer). Keep the meaning short (Chinese is fine). The QQ bot relays this line to the user — add nothing else.',
+    '2a. The plugin re-checks every ✅ against the meaning it stored; a different meaning is scheduled as wrong even if you accepted it. Grade strictly, do not be encouraging.',
     '3. If that message is clearly not an answer (e.g. 开始/继续/停止/统计 or a pasted word list), use the matching tool instead: vocab_start, vocab_stop, vocab_stats, vocab_import.',
     '4. The plugin records answers and schedules the next question; never calculate due words, quota, or timing yourself. The next `Q:` line arrives from the plugin.',
     '5. Keep replies to QQ short: one line unless a tool result asks otherwise.',
@@ -1141,6 +1316,22 @@ export function apply(ctx, config) {
     return agent && agent.session && typeof agent.session.id === 'string' ? agent.session.id : undefined
   }
 
+  function parseGradeLine(line) {
+    const trimmed = String(line || '').trim()
+    if (!trimmed) return null
+    const mark = /^(✅|✔️?|☑️?|🤔|❔|❓|⁉️?|❌|✖️?|✗)\s*/u.exec(trimmed)
+    if (!mark) return null
+    const pair = /^(.+?)\s*=\s*(.+)$/u.exec(trimmed.slice(mark[0].length))
+    if (!pair) return null
+    const symbol = mark[1]
+    const verdict = symbol.startsWith('🤔') || symbol.startsWith('❔') || symbol.startsWith('❓') || symbol.startsWith('⁉')
+      ? 'fuzzy'
+      : symbol.startsWith('❌') || symbol.startsWith('✖') || symbol.startsWith('✗')
+        ? 'wrong'
+        : 'correct'
+    return { verdict, word: pair[1], meaning: pair[2] }
+  }
+
   function handleAssistantText(text, session) {
     if (!text) return
     const sessionId = session && typeof session.id === 'string' ? session.id : undefined
@@ -1148,18 +1339,11 @@ export function apply(ctx, config) {
     if (routed && sessionId && sessionId !== routed) return
     let recorded = false
     for (const line of text.split(/\r?\n/)) {
-      const trimmed = line.trim()
-      if (!trimmed) continue
-      let match = /^(?:✅|✔️?|☑️?)\s*(.+?)\s*=\s*(.+)$/u.exec(trimmed)
-      let correct = true
-      if (!match) {
-        match = /^(?:❌|✖️?|✗)\s*(.+?)\s*=\s*(.+)$/u.exec(trimmed)
-        correct = false
-      }
-      if (!match) continue
-      const key = normalizeWord(match[1])
+      const grade = parseGradeLine(line)
+      if (!grade) continue
+      const key = normalizeWord(grade.word)
       if (!state.words[key]) continue
-      if (recordAnswer(key, correct, match[2], sessionId)) recorded = true
+      if (gradeAnswer(key, grade.verdict, grade.meaning, sessionId)) recorded = true
     }
     if (!recorded) return
     // The next `Q:` line usually comes from the plugin, but a model replying
@@ -1193,7 +1377,10 @@ export function apply(ctx, config) {
     }
     if (event.type === 'user/message') {
       const text = textOfEvent(event).trim()
-      if (text && STOP_WORDS.test(text)) stopLoop()
+      if (!text) return
+      const sessionId = session && typeof session.id === 'string' ? session.id : ''
+      rememberUserText(text, sessionId)
+      if (STOP_WORDS.test(text)) stopLoop()
     }
   })
 
@@ -1313,7 +1500,7 @@ export function apply(ctx, config) {
   ctx.effect(
     () => ctx.tools.register({
       name: 'vocab_stats',
-      description: 'Read a compact vocabulary review summary: due count, wrong-word count, total words, current queue, loop state, and daily quota counters.',
+      description: 'Read a compact vocabulary review summary: due count, wrong-word count, fuzzy-word count, total words, current queue, loop state, and daily quota counters.',
       parameters: { type: 'object', properties: {}, additionalProperties: false },
       output: toolOutput,
       async execute() {
@@ -1325,7 +1512,7 @@ export function apply(ctx, config) {
             : ''
         return {
           ok: true,
-          message: `DUE: ${summary.dueNow} due now · ${summary.wrongCount} wrong · ${summary.total} words · loop ${summary.loop}${next} · today ${summary.counters.total} questions. QUEUE: ${summary.queue.join(', ') || '(empty)'}`,
+          message: `DUE: ${summary.dueNow} due now · ${summary.wrongCount} wrong · ${summary.fuzzyCount} fuzzy · ${summary.total} words · loop ${summary.loop}${next} · today ${summary.counters.total} questions. QUEUE: ${summary.queue.join(', ') || '(empty)'}`,
           ...summary,
         }
       },
@@ -1515,6 +1702,20 @@ export function apply(ctx, config) {
         errors: word.errors,
         lastErrorAt: word.lastErrorAt,
       }))
+    // The wrong-word book: every word that ever failed or was only half
+    // recognised, hardest first. Capped so the 2s panel poll stays small.
+    const weakWords = all
+      .filter((word) => word.errors > 0 || word.fuzzy > 0)
+      .sort((a, b) => (b.errors - a.errors) || (b.fuzzy - a.fuzzy) || ((b.lastErrorAt || 0) - (a.lastErrorAt || 0)))
+      .slice(0, 60)
+      .map((word) => ({
+        word: word.word,
+        meaning: word.meaning,
+        errors: word.errors,
+        fuzzy: word.fuzzy,
+        stage: word.stage,
+        dueAt: word.dueAt,
+      }))
     return {
       loop: state.loop,
       idleReason: state.idleReason,
@@ -1530,8 +1731,12 @@ export function apply(ctx, config) {
       dueNow: all.filter((word) => word.dueAt <= now).length,
       dueToday: all.filter((word) => word.dueAt <= end).length,
       wrongCount: wrong.length,
+      fuzzyCount: all.filter((word) => word.fuzzy > 0).length,
       total: all.length,
       recentErrors,
+      weakWords,
+      verifyAnswers: cfg.verifyAnswers,
+      lastConflict: state.lastConflict || null,
       counters: { ...state.dailyCounters },
       quota: state.quota,
       settings: {
@@ -1581,6 +1786,89 @@ export function apply(ctx, config) {
       'content-length': Buffer.byteLength(body),
     })
     res.end(body)
+  }
+
+  function writeText(res, status, contentType, body, headers = {}) {
+    res.writeHead(status, {
+      'content-type': contentType,
+      'cache-control': 'no-store',
+      'content-length': Buffer.byteLength(body),
+      ...headers,
+    })
+    res.end(body)
+  }
+
+  // ── Wrong-word book actions + CSV export ─────────────────────────────────
+  function wordAction(op, raw) {
+    const key = normalizeWord(String(raw || ''))
+    const word = key ? state.words[key] : null
+    if (!word) return { ok: false, code: 'unknown-word' }
+    const wasPending = state.pendingWord === word.word
+    const now = Date.now()
+    if (op === 'remove') {
+      delete state.words[word.word]
+      state.queue = state.queue.filter((item) => item !== word.word)
+    } else if (op === 'master') {
+      // Out of the wrong book: marked known, scheduled at the top of the ladder.
+      word.errors = 0
+      word.fuzzy = 0
+      word.lastErrorAt = null
+      word.lastFuzzyAt = null
+      word.stage = cfg.ladderMinutes.length - 1
+      word.dueAt = now + intervalOf(word)
+      state.queue = state.queue.filter((item) => item !== word.word)
+    } else if (op === 'forget') {
+      // Ask it again right now, from the bottom of the ladder.
+      word.stage = 0
+      word.dueAt = now
+    } else {
+      return { ok: false, code: 'unknown-op' }
+    }
+    if (wasPending && op !== 'forget') {
+      state.pendingWord = null
+      state.pendingCounted = false
+    }
+    markTick()
+    saveLedger()
+    // Removing/mastering the word being asked right now would otherwise leave
+    // the loop running with no pending question; ask the next one immediately.
+    if (wasPending && op !== 'forget' && state.loop === 'running') {
+      advanceAfterAnswer(state.activeSessionId || routedSessionId() || '', '')
+    }
+    return { ok: true, word: word.word, op }
+  }
+
+  function csvCell(value) {
+    const text = String(value === undefined || value === null ? '' : value)
+    return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text
+  }
+
+  function stampText(ms) {
+    if (!Number.isFinite(ms)) return ''
+    const date = new Date(ms)
+    const pad = (value) => String(value).padStart(2, '0')
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
+  }
+
+  function exportCsv(scope) {
+    const rows = [['word', 'meaning', 'errors', 'fuzzy', 'stage', 'correct', 'due_at', 'last_result_at']]
+    const list = entries()
+      .filter((word) => (scope === 'all' ? true : word.errors > 0 || word.fuzzy > 0))
+      .sort((a, b) => (b.errors - a.errors) || (b.fuzzy - a.fuzzy) || a.word.localeCompare(b.word))
+    for (const word of list) {
+      rows.push([
+        word.word,
+        word.meaning,
+        word.errors,
+        word.fuzzy,
+        word.stage,
+        word.correct,
+        stampText(word.dueAt),
+        stampText(word.lastResultAt),
+      ])
+    }
+    // BOM so Excel opens the Chinese meanings as UTF-8 instead of mojibake.
+    return `\uFEFF${rows.map((row) => row.map(csvCell).join(',')).join('\r\n')}\r\n`
   }
 
   async function readJsonBody(req) {
@@ -1797,6 +2085,23 @@ export function apply(ctx, config) {
                 deferred: Boolean(result.deferred),
                 quota: result.quota || null,
               },
+            })
+            return
+          }
+          if (req.method === 'POST' && (action === 'words/master' || action === 'words/forget' || action === 'words/remove')) {
+            const body = await readJsonBody(req)
+            const result = wordAction(action.slice('words/'.length), body && body.word)
+            if (!result.ok) {
+              writeJson(res, 200, { ok: false, error: { code: result.code, message: 'That word is not in the ledger.' } })
+              return
+            }
+            writeJson(res, 200, { ok: true, value: { ...(await stateWithSessions()), wordAction: result } })
+            return
+          }
+          if (req.method === 'GET' && action === 'export.csv') {
+            const scope = url.searchParams.get('scope') === 'all' ? 'all' : 'weak'
+            writeText(res, 200, 'text/csv; charset=utf-8', exportCsv(scope), {
+              'content-disposition': `attachment; filename="vocab-${scope}.csv"`,
             })
             return
           }
