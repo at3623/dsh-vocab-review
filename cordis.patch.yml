@@ -11,6 +11,7 @@
       name: dsh-vocab-review
       config:
         queueSize: 5
+        autoContinue: true
         wrongInject: 2
         retryDelayMinutes: 5
         ladderMinutes: [30, 180, 720, 2880, 10080, 43200]

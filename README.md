@@ -1,12 +1,225 @@
 # dsh-vocab-review
 
-Underlined-word vocabulary review for DeepSeek Harness.
+**上传一张划线的单词表图片，插件就把它变成逐词抽查；答错的词按间隔一次次回来。**
+[中文文档](#中文文档) · [English docs](#english-docs)
+
+DeepSeek Harness（DSH）插件 · 无额外 npm 依赖 · 数据只在本机 · 可选 QQ 通道
+
+---
+
+## 中文文档
+
+### 核心功能：图片导入，不用手打单词
+
+这是这个插件最省事的地方：**你只需要上传图片，不用整理词表、不用抄单词、不用管错词本。**
+
+1. 在对话里直接上传一张单词表 / 试卷 / 作业 / 阅读材料的图片。
+2. 聊天模型读图，只挑出**划线的英文单词**，并统一还原成原形（`ran → run`、`benefits → benefit`、`studies → study`），去重后调用 `vocab_import`。
+3. 插件收到纯文本词表后：规范化 → 去重 → 标出高频/普通/低频 → 写进本地 `ledger.json`，并立刻出第一题。
+4. **图片不会被插件读取、保存或上传**：插件没有 OCR、没有图片处理依赖，落盘的只有文字词表。
+
+```text
+你：[上传单词表图片]
+模型：读图，只挑划线词 → vocab_import("abandon, benefit, cautious, ...")
+插件：规范化 + 去重 + 排复习计划 → 存入 ledger.json
+插件/模型：Q: abandon
+你：放弃
+模型：✅ abandon = 放弃        ← 只有这一行
+插件：记录结果 + 安排下次复习 → Q: benefit
+```
+
+> **为什么强调"图片导入"**
+>
+> - 拍照/截图即可开工，一本书几十个划线词，一次导入，不用敲键盘。
+> - 词表是**干净的原形列表**，不会因为图片里有中文、题号、页码、多列排版而变脏。
+> - 图片本身不留在插件里：隐私可控，`ledger.json` 里只有 `word / meaning / dueAt / errors` 这类字段。
+> - 也可以完全不用图片——直接发文字词表（例如 `abandon, benefit, cautious`）效果完全一样。
+>
+> **适用范围**：模型读图效果取决于图片清晰度；划线要能看清（直线划在词下最稳）。字迹模糊、双栏交错、整页密排时，识别可能漏词或多词，这时改用文字词表最稳。
+
+### 一分钟上手
+
+```powershell
+# 从 GitHub 安装（需要 DSH 0.2.x、Node 22+）
+dsh plugin --profile <profile> add github:at3623/dsh-vocab-review
+```
+
+或者：DSH → **插件** → **添加插件** → 选择本目录（本地目录安装）。
+
+装好后：
+
+1. 在任意对话里**上传划线单词表图片**（或粘贴文字词表），等待导入。
+2. 左侧栏点 **单词复习** 图标 → 选择「复习对话」→ 点 **开始复习**。
+3. 在对话里按提示回答中文释义；答完一个，插件自动问下一个。
+4. 答错不要紧：错词进入错词池，按间隔阶梯自动回来重问。
+
+要求：DSH 0.2.x、Node 22+、无额外 npm 依赖。QQ 通道是可选功能，需要再装 `@hualiong/dsh-qq-bot` 并完成绑定。
+
+### 复习是怎么跑起来的
+
+答案由**插件**调度，模型只负责两件事：读图取词、批改你的一句话。
+
+- 每轮把压缩后的状态注入给模型（只两行，几乎不占上下文）：
+
+  ```text
+  QUEUE: abandon, benefit, cautious
+  DUE: 3 due now · 1 wrong · 52 words
+  ```
+
+- 模型严格按格式输出，不许加鼓励语、表格、总结：
+  - 提问：`Q: {word}`
+  - 批改：`✅ {word} = {meaning}` 或 `❌ {word} = {meaning}`
+- 插件监听对话事件，解析这一行 → 记录对错 → 更新 `dueAt` → 自动发 `继续复习` 让模型问下一个词。
+- **到期词、错误次数、每日限额、下次复习时间全部由插件计算**，模型完全不参与，所以不会算错、不会"自由发挥"。
+
+间隔阶梯（固定阶梯，类似 SM-2 的简化版）：
+
+```text
+答对：30 分钟 → 3 小时 → 12 小时 → 2 天 → 7 天 → 30 天
+答错：退回第 0 档，retryDelayMinutes（默认 5 分钟）后重问
+高频词：间隔 × 0.7（问得更勤）   低频词：间隔 × 1.6（问得更稀）
+```
+
+### 自动续轮（v1.3.1 之后的默认行为）
+
+一轮队列只有 `queueSize`（默认 5）个词，但这只是**批量大小，不是一节的长度**：
+
+- `autoContinue: true`（默认开）时，队列空了会自动用**此刻已到期**的词补满并继续问，不会再"问几个就停"。
+- 补队只用 `dueAt <= now` 的词，不会把还没到期的词提前拉进来烧配额；刚答过的词被推到下一档，不会被立刻重问。
+- 结束只有两种可能，而且都会说明原因：
+  - 到每日上限 → `loop: stopped`，面板显示 `今日已达上限 (review 12/12)`；
+  - 没有到期词 → `loop: idle`，面板显示 `今天到期的单词都已复习完 · 下一个到期 17:35`，QQ 上会推一条 `✅ 今天到期的单词都复习完了（今日 N 个，下一个 17:35 到期）。想继续就回「开始背单词」。`
+- 想恢复"每次只问一批"的旧行为：`autoContinue: false`。
+
+### 每日限额
+
+面板「限额与提醒」里可改，存进 `settings.json`，立即生效，不用重启：
+
+| 配置 | 默认 | 含义 |
+| --- | --- | --- |
+| `dailyNewLimit` | `20` | 每天最多问多少个新词（0 = 不限） |
+| `dailyReviewLimit` | `50` | 每天最多问多少个复习词（0 = 不限） |
+| `dailyTotalLimit` | `0` | 每天总题数上限（0 = 不限） |
+| `dailyMinutesLimit` | `0` | 每天复习分钟上限（0 = 不限） |
+
+计数器 `dailyCounters: { date, new, review, total, minutes }` 存在 `ledger.json`；跨天自动清零。没有可用词时进入 `stopped` 并给出 `今日已达上限 (...)`，没问到的词留在队列里、按 `dueAt` 自然顺延。
+
+### 到期提醒
+
+- 每个词自带 `dueAt`；Host 定时器每 60 秒做一次**时间戳比较**（不是计数），后台节流也不会算错。
+- 每天最多提醒 `reminderMaxPerDay` 次（默认 1），超过 1 次时两次之间至少间隔 3 小时。
+- 提醒方式：侧栏图标红点 + 面板横幅 + 可选的浏览器通知（需已授权）。没有到期词就不会提醒。
+
+### 侧栏面板
+
+左侧栏图标（`sidebar.panellist`，id `vocab-review`）打开一个面板：
+
+- 今日到期数 / 错词数 / 总词数；
+- 今日计数（新词 / 复习 / 题数 / 分钟）；
+- 上限提示 `今日已达上限 (…)` 与"到期了"横幅；
+- 停止后说明为什么停（`idleReason`）；
+- 开始 / 继续 / 停止 / 暂停；
+- 最近错词（含释义与错误次数）、当前队列；
+- 可编辑限额与提醒次数，「保存」即时写入 `settings.json`。
+
+### 工具（给模型用）
+
+| 工具 | 用途 |
+| --- | --- |
+| `vocab_import` | 导入划线单词（或文字词表），开始一轮复习，遵守限额 |
+| `vocab_start` | 从保存的队列开始/继续（不重建已有队列） |
+| `vocab_stop` | 停止循环；保留词表与队列，不产生对话消息 |
+| `vocab_stats` | 到期/错词/队列/循环状态/计数的压缩摘要 |
+
+### 对话选择器
+
+面板下拉列出你已有的 DSH 对话（标题）。选中后：
+
+- `selectedSessionId` 写入 `settings.json`，刷新页面、重启 Host 都还在；
+- 所有复习提示词（`开始词汇复习` / `继续复习`）只投给**那一个**对话，不会跑到主对话；
+- QUEUE 注入与答案解析也只对那个会话的 Agent 生效。
+
+选中的对话被归档/删除时，自动回落到第一个可用对话。若从别的对话导入词表，队列会保存并等你在选中的对话里点开始。
+
+### QQ 通道（dsh-qq-bot）
+
+官方 QQ 机器人插件（`@hualiong/dsh-qq-bot`）完成绑定后，可以在 QQ 里复习同一份词表：
+
+- 面板出现 QQ 一行：**在 QQ 上复习** = 切到 QQ 绑定的会话并置 `channel: "qq"`；**回到网页复习** = 切回原对话。
+- 题目由**插件推**：通过机器人的 `send_qq_message` 工具直接发 `Q: {word}`，不依赖模型主动发言；下一题会等批改消息那一轮结束后 +1.5 秒再发，避免抢话。
+- 答案仍由**模型批改**：你在 QQ 里回复 → 机器人以 `[QQ] …` 投给绑定会话 → 模型只回一行 `✅/❌ {word} = {meaning}` → 机器人转发 → 插件记录。
+- 到期提醒也会推到同一个 QQ 聊天，仍受 `reminderMaxPerDay` 限制。
+- **QQ 机器人只接受文字消息**，所以图片导入请在网页对话里做；导入后在 QQ 里复习即可，词表和计划两边共用。
+- 发送失败会显示在面板上，并写入 `ledger.json` 的 `qqError`。
+
+### 停止：强暂停
+
+「停止」按钮只在当前会话正在生成时可用，执行的是和 `dsh-interrupt-button` 一样的强暂停序列：
+
+1. `agent.cancel({ kind: 'user' }, { keepInbox: true })`
+2. 杀掉该 Agent 的后台 jobs
+3. 杀掉它的 terminals
+4. 中断它的子代理
+5. 如有武装的 goal，则解除
+
+全程静默：不写提示词、不 steer、不伪造对话消息。之后循环仍是 `running`、队列原样保留，点继续即可接着问。只影响**被选中的**那个会话。
+
+### 配置
+
+插件配置写在 `cordis.patch.yml` 的 `vocab-review` 行里；每日限额与提醒次数也可以在面板里改（存 `settings.json`，优先于默认值）。
+
+| 配置 | 默认 | 说明 |
+| --- | --- | --- |
+| `queueSize` | `5` | 一轮队列词数（1–20），只是批量大小 |
+| `autoContinue` | `true` | 队列空了自动用已到期词续轮 |
+| `wrongInject` | `2` | 每轮随机插入的错词数 |
+| `retryDelayMinutes` | `5` | 答错后多久重问 |
+| `ladderMinutes` | `[30,180,720,2880,10080,43200]` | 间隔阶梯（分钟） |
+| `highMultiplier` / `lowMultiplier` | `0.7` / `1.6` | 高频词更勤 / 低频词更稀 |
+| `maxRecentErrors` | `5` | 面板最近错词条数 |
+| `startPrompt` / `continuePrompt` | `开始词汇复习` / `继续复习` | 注入的提示词 |
+| `dataDir` | `<DSH_HOME>/vocab-review` | 数据目录 |
+| `channel` | `auto` | `auto` / `qq` / `session` |
+| `qqStatePath` | `<DSH_HOME>/integrations/dsh-qq-bot/state.json` | QQ 机器人状态文件 |
+
+### 隐私与安全
+
+- **不联网、不上报、不需要任何密钥。** 全部逻辑跑在本机 Host。
+- **单词表图片不会被插件读取或保存**：读图由聊天模型完成，只把纯文本词表交给插件。
+- 插件只写两个文件：`<DSH_HOME>/vocab-review/ledger.json`（词表/队列/计数）与 `settings.json`（限额、所选对话、提醒记录），原子写入（临时文件 + rename）。
+- 强暂停只碰**被选中**会话的 Agent / jobs / terminals / 子代理，不动别的会话。
+- QQ 通道只读机器人的 `state.json`（绑定会话 + 最近聊天目标），复用它已有的 `send_qq_message` 发送；不读 AppID/AppSecret，也不另开一条 QQ 连接。
+
+### 测试
+
+```powershell
+npm test          # 三个离线 harness
+npm run check     # 语法检查
+```
+
+- `test/harness.mjs` —— 13 项：导入、✅/❌ 记账、压缩注入、停止/继续、每日限额、面板改限额、每日提醒、跨天清零、重启持久化、QQ 通道、**自动续轮**、QQ 自动停下时推一条说明。
+- `test/sessions-stop.mjs` —— 对话列表/选择持久化/路由、强暂停、归档回落。
+- `test/client-load-check.mjs` —— 用 mock loader 跑一遍 Client 半边，确认侧栏与面板注册。
+- `test/make_test_image.py` —— 重新生成 3 个划线词的测试图片。
+
+### 限制
+
+- 取词依赖聊天模型的读图能力，插件本身不做 OCR。
+- 复习在对话里进行；没有会话时「开始」会提示你先开一个。
+- `继续复习` 是一条可见的 user 消息，这是故意的——它是模型下一次回答的唤醒信号。
+- 浏览器通知需要你点过授权；侧栏红点与面板横幅不需要。
+
+---
+
+# English docs
+
+Underlined-word vocabulary review for DeepSeek Harness. This README is bilingual: 中文在上，English below.
 
 ## Install
 
 Requires DeepSeek Harness 0.2.x, Node 22+, and no extra npm dependencies. The optional QQ channel needs `@hualiong/dsh-qq-bot` installed and bound to a session.
 
-**From GitHub** (once this repository is pushed):
+**From GitHub:**
 
 ```powershell
 dsh plugin --profile <profile> add github:at3623/dsh-vocab-review
@@ -26,7 +239,7 @@ The bundle patch inserts the `vocab-review` row; the Client half is discovered f
 
 ## What it does
 
-1. **Image ingestion** — the user uploads a worksheet image. The model reads it, extracts every **underlined English word** in base form, and calls `vocab_import` with a comma-separated list. The plugin normalizes the list, deduplicates it, and stores only the words; the image is never read or kept by the plugin.
+1. **Image ingestion (the headline feature)** — the user uploads a worksheet image. The model reads it, extracts every **underlined English word** in base form, and calls `vocab_import` with a comma-separated list. The plugin normalizes the list, deduplicates it, and stores only the words; the image is never read or kept by the plugin. A typed word list works exactly the same way.
 2. **Q&A loop driven by the plugin** — each turn injects a compact queue:
 
    ```text
@@ -83,6 +296,7 @@ The plugin registers a left-sidebar icon (`sidebar.panellist`, id `vocab-review`
 - today's due count, wrong count, total words;
 - today's counters (new / review / questions / minutes);
 - the quota stop message `今日已达上限 (…)`;
+- an idle reason line after an automatic stop;
 - a due-reminder banner;
 - Start / Resume / Stop;
 - the recent error words with meanings and counts;
