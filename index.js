@@ -337,6 +337,9 @@ export function apply(ctx, config) {
   let continueToken = 0
   // Built-in QQ bot runtime ({ client, bridge }) when enabled in the panel.
   let qqBuiltin = null
+  // Set when the current prompt came from a QQ image: the import tools then only
+  // store words instead of starting the review loop. Cleared by the next import.
+  let qqImageImportUntil = 0
   // Cheap runtime diagnostics for the panel: no extra files, no logging deps.
   const diag = { lastSaveMs: 0, lastSaveAt: null, ledgerBytes: 0 }
 
@@ -828,7 +831,7 @@ export function apply(ctx, config) {
       })
   }
 
-  const QQ_START = /^(?:开始|继续|开始背单词|开始复习|继续复习|start|continue)[\s!！。.]*$/iu
+  const QQ_START = /^(?:开始|继续|开启|开背|开始背单词|开启复习|开始复习|继续复习|start|continue)[\s!！。.]*$/iu
   const QQ_STOP = /^(?:停止|暂停|结束|stop|pause)[\s!！。.]*$/iu
   const QQ_STATS = /^(?:统计|状态|进度|stats|status)[\s!！。.]*$/iu
 
@@ -885,6 +888,9 @@ export function apply(ctx, config) {
       client,
       resolveSession: () => selectedSessionId() || state.activeSessionId || '',
       onCommand: handleQqCommand,
+      onImage: () => {
+        qqImageImportUntil = Date.now() + 180_000
+      },
       send: sendToQqChat,
     })
     client.onMessage = (message) => {
@@ -1466,6 +1472,10 @@ export function apply(ctx, config) {
   function importWords(raw, sessionId, options = {}) {
     const article = options.article === true
     const examLevel = normalizeExamLevel(options.examLevel, cfg.examLevel)
+    // A QQ image import only fills the ledger: the user starts the review from
+    // QQ with 「开始背单词」 instead of being quizzed in the web chat.
+    const fromQqImage = Date.now() < qqImageImportUntil
+    if (fromQqImage) qqImageImportUntil = 0
     const parsed = splitWords(raw)
     if (parsed.length === 0) return { ok: false, error: 'no-words', words: [], queue: [] }
     const now = Date.now()
@@ -1533,6 +1543,7 @@ export function apply(ctx, config) {
       existing: existingKeys,
       parsed: candidates.length,
       examLevel,
+      qqPending: fromQqImage,
     }
     // Remember what the last import looked like so the panel can warn when an
     // image probably lost words ("可能是识别不完整").
@@ -1562,14 +1573,15 @@ export function apply(ctx, config) {
     const sameSession = Boolean(sessionId) && routed === sessionId
     // An article import never starts the loop: the user should see which words
     // were picked (and which basic ones were dropped) before being quizzed.
-    if (article) {
+    // A QQ image import never starts it either: the user starts from QQ.
+    if (article || fromQqImage) {
       state.loop = 'stopped'
       saveLedger()
       return {
         ok: true,
         blocked: false,
         deferred: !sameSession,
-        article: true,
+        article,
         words: keys,
         added: accepted.map((item) => item.word),
         queue: state.queue.slice(),
@@ -1813,6 +1825,15 @@ export function apply(ctx, config) {
         if (!result.ok) {
           return { ok: false, message: 'No valid English words were found. Ask the user for a clearer worksheet image.', words: [], queue: [] }
         }
+        if (result.qqPending) {
+          return {
+            ok: true,
+            qqPending: true,
+            message: `Imported ${result.words.length} word(s) from the QQ image; the review is NOT started. Do NOT output any Q: line. Reply with one short line and tell the user to send 「开始背单词」 in QQ when they are ready. QUEUE: ${result.queue.join(', ') || '(empty)'}`,
+            words: result.words,
+            queue: result.queue,
+          }
+        }
         if (result.blocked) {
           return {
             ok: true,
@@ -1906,7 +1927,9 @@ export function apply(ctx, config) {
           lines.push(`Already known: ${result.existing.slice(0, 10).join(', ')}.`)
         }
         lines.push(
-          `The review is NOT running. Reply with the picked list in one or two short lines, then tell the user to press Start in the Vocabulary review panel or say 「开始背单词」. QUEUE: ${result.queue.join(', ') || '(empty)'}`,
+          result.qqPending
+            ? `The review is NOT running and must not start now. Reply with the picked list in one or two short lines, then tell the user to send 「开始背单词」 in QQ when they want to start. QUEUE: ${result.queue.join(', ') || '(empty)'}`
+            : `The review is NOT running. Reply with the picked list in one or two short lines, then tell the user to press Start in the Vocabulary review panel or say 「开始背单词」. QUEUE: ${result.queue.join(', ') || '(empty)'}`,
         )
         return {
           ok: true,

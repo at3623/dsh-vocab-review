@@ -281,13 +281,32 @@ assert.equal(Buffer.from(imagePart.data, 'base64').toString(), 'fake-jpeg-bytes'
 assert.ok(env.prompts[1].content.some((part) => part.type === 'text' && part.text.includes('vocab_import_article')))
 console.log('PASS builtin QQ: inbound image becomes an image block with import instructions')
 
+// ── 4b. A QQ image import only stores words; review waits for a QQ command ─
+const qqImport = await env.tools.get('vocab_import').execute(
+  { words: 'gesture, glance' },
+  { agent: { session: { id: 'session-test' } } },
+)
+assert.equal(qqImport.ok, true)
+assert.equal(qqImport.qqPending, true, 'a QQ image import reports qqPending')
+assert.ok(qqImport.message.includes('开始背单词'), 'the tool tells the model to wait for the QQ command')
+assert.equal(qqImport.message.includes('Q: gesture'), false, 'no Q line is requested')
+let afterImport = await stateOf(env.routes)
+assert.equal(afterImport.loop, 'stopped', 'QQ image imports never auto-start the review loop')
+assert.equal(afterImport.queue.includes('gesture'), true, 'the imported words wait in the queue')
+assert.equal(
+  sentMessages.filter((message) => /^Q: /u.test(message.body.content)).length,
+  0,
+  'nothing is pushed to QQ before the command',
+)
+console.log('PASS builtin QQ: a QQ image import stores words only, review waits for the QQ command')
+
 // ── 5. Command: start review pushes the first question ───────────────────
 await post(env.routes, 'stop', {})
 const before = sentMessages.length
 ws.dispatch('C2C_MESSAGE_CREATE', { id: 'msg-3', content: '开始背单词', author: { user_openid: 'OPENID_1' } })
 await wait(40)
 assert.equal(sentMessages.length, before + 1, 'start answered with the first question')
-assert.match(sentMessages[sentMessages.length - 1].body.content, /^Q: (?:abandon|benefit)$/u)
+assert.match(sentMessages[sentMessages.length - 1].body.content, /^Q: (?:abandon|benefit|gesture|glance)$/u)
 assert.equal(env.prompts.length, 2, 'commands are handled without a model turn')
 state = await stateOf(env.routes)
 assert.equal(state.loop, 'running')

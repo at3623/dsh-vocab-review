@@ -99,6 +99,13 @@ export function createQqBridge(options) {
         return
       }
       content = parts
+      // Tell the plugin that this turn came from a QQ image, so an import tool
+      // call stores words without starting the review loop.
+      try {
+        options.onImage?.()
+      } catch {
+        /* the plugin flag is advisory */
+      }
     } else {
       content = [{ type: 'text', text: `${QQ_PREFIX} ${text}` }]
     }
@@ -120,7 +127,7 @@ export function createQqBridge(options) {
     return [
       {
         type: 'text',
-        text: `${QQ_PREFIX} 用户通过 QQ 发来一张图片。如果它是有划线的单词表，请调用 vocab_import 导入划线词（原形、逗号分隔）；如果它是没有划线的文章/阅读材料，请调用 vocab_import_article 按考试高频词挑词，不要整篇导入。图片只用于识别，不会被保存。导入后用一两句话告诉用户结果。`,
+        text: `${QQ_PREFIX} 用户通过 QQ 发来一张图片。如果它是有划线的单词表，请调用 vocab_import 导入划线词（原形、逗号分隔）；如果它是没有划线的文章/阅读材料，请调用 vocab_import_article 按考试高频词挑词，不要整篇导入。图片只用于识别，不会被保存。导入后用一两句话告诉用户结果。复习不要自动开始，也不要输出任何 Q: 行——用户在 QQ 里发「开始背单词」时才重新开始复习。`,
       },
       { type: 'image', mediaType, data: media.data, name: attachment.filename || 'qq-image' },
     ]
