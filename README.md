@@ -232,7 +232,8 @@ QQ 功能**不是本插件实现的**，而是桥接第三方插件 `@hualiong/d
 - 题目由**插件推**：通过机器人的 `send_qq_message` 工具直接发 `Q: {word}`，不依赖模型主动发言；下一题会等批改消息那一轮结束后 +1.5 秒再发，避免抢话。
 - 答案仍由**模型批改**，但插件会复核：你在 QQ 里回复 → 机器人以 `[QQ] …` 投给绑定会话 → 模型只回一行 `✅/🤔/❌ {word} = {meaning}` → 机器人转发 → 插件记录；模型给的 ✅ 若跟已存词义不符，插件仍按错处理，`🤔` 走半档。
 - 到期提醒也会推到同一个 QQ 聊天，仍受 `reminderMaxPerDay` 限制。
-- **QQ 机器人只接受文字消息**，所以图片导入请在网页对话里做；导入后在 QQ 里复习即可，词表和计划两边共用。
+- **入站只转发文字**（这是 `dsh-qq-bot` 的实现限制，不是 QQ 平台限制）：QQ 平台本身支持私聊发图片，它用的 SDK 也把图片放在 `message.attachments`（`content_type` / `url` / `filename`）里；但这个机器人的入站桥接只读文本 `content`，图片消息的 content 为空时它直接回「目前只支持文字消息」，提交给 DSH 的内容也始终是纯文本（`[{ type: 'text' }]`）。所以图片导入请在网页对话里做，或者在 QQ 里贴文字（文章文字也行，走 `vocab_import_article`）；导入后在 QQ 里复习即可，词表和计划两边共用。
+- 反过来，机器人的**出站**方向支持图片/文件：`send_qq_message` 的 `image` / `file` 参数走 QQ 富媒体（`msg_type=7`，图片上限 20MB、文件 200MB），只是本插件目前没有用它发图。
 - 发送失败会显示在面板上，并写入 `ledger.json` 的 `qqError`。
 
 ### 停止：强暂停
@@ -498,7 +499,8 @@ QQ is **not implemented by this plugin**: it bridges the third-party `@hualiong/
 - **Delivery is plugin-driven.** The plugin pushes `Q: {word}` to QQ through the bot's `send_qq_message` tool (`tools.get('send_qq_message')`), so no model turn is needed to carry a question. A next question waits for the graded answer's turn to end plus a 1.5 s head start, so the bot's reply is never overtaken.
 - **Answers stay model-graded.** The user replies in QQ; the bot prompts the bound session with `[QQ] …`; the model sees the QQ protocol section (QUEUE head = pending word, reply exactly one `✅/🤔/❌ {word} = {meaning}` line); the bot relays that line; the plugin records it from the same session event stream it already watches and queues the next question.
 - **Due reminders** are pushed to the same QQ chat, still capped by `reminderMaxPerDay` (default 1/day).
-- **Image upload is not part of the QQ bot's inbound path** (it accepts text only), so import the worksheet image from the Web chat or paste the word list in QQ. The ledger and schedule are shared either way.
+- **Inbound is text-only in the bot** (a `dsh-qq-bot` limitation, not a QQ platform one): QQ private chats do support images, and the SDK exposes them as `message.attachments` (`content_type` / `url` / `filename`), but the bot's inbound bridge only reads the text `content`, answers “目前只支持文字消息” when an image message has no text, and always submits `[{ type: 'text' }]` to DSH. Import the worksheet/article image from the Web chat, or paste the text in QQ (`vocab_import_article` handles article text); the ledger and schedule are shared either way.
+- The bot's **outbound** direction does support media: `send_qq_message` accepts `image` / `file` (QQ rich media, `msg_type=7`, 20 MB images / 200 MB files), but this plugin does not send images today.
 - If the bot is missing, unbound, or a send fails, the panel row reports it and the error is persisted as `qqError` in `ledger.json`. The state file location can be overridden with the `qqStatePath` plugin config.
 
 ## Stop (strong pause, req. 8)
