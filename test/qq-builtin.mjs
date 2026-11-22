@@ -52,6 +52,7 @@ class FakeWs {
 
 // ── Fake HTTP ─────────────────────────────────────────────────────────────
 const sentMessages = []
+const panels = []
 function response({ status = 200, body = null, mediaType = 'application/json', bytes = null }) {
   const text = bytes ? '' : JSON.stringify(body ?? {})
   return {
@@ -65,9 +66,23 @@ function response({ status = 200, body = null, mediaType = 'application/json', b
 }
 async function fakeFetch(url, init = {}) {
   const target = String(url)
+  const pathname = target.split('?')[0]
+  const method = String(init.method || 'GET').toUpperCase()
   if (target.includes('/app/getAppAccessToken')) return response({ body: { access_token: 'TOKEN-1', expires_in: 7200 } })
-  if (target.endsWith('/gateway')) return response({ body: { url: 'wss://gateway.test/websocket' } })
-  if (/\/v2\/(?:users|groups)\/[^/]+\/messages$/u.test(target)) {
+  if (pathname.endsWith('/gateway')) return response({ body: { url: 'wss://gateway.test/websocket' } })
+  if (pathname.endsWith('/v2/panels') && method === 'GET') return response({ body: { records: panels } })
+  if (pathname.endsWith('/v2/panels') && method === 'POST') {
+    const body = JSON.parse(init.body)
+    panels.push({ panel_id: `panel-${panels.length + 1}`, scope: body.scope, target_type: body.target_type, panel: body.panel })
+    return response({ body: {} })
+  }
+  if (/\/v2\/panels\/[^/]+$/u.test(pathname) && method === 'PUT') {
+    const body = JSON.parse(init.body)
+    const panel = panels.find((record) => pathname.endsWith(encodeURIComponent(record.panel_id)))
+    if (panel) panel.panel = body.panel
+    return response({ body: {} })
+  }
+  if (/\/v2\/(?:users|groups)\/[^/]+\/messages$/u.test(pathname)) {
     const body = init.body ? JSON.parse(init.body) : {}
     sentMessages.push({ url: target, body })
     return response({ body: { id: `sent-${sentMessages.length}` } })
@@ -232,7 +247,22 @@ assert.equal(state.qq.builtin.state, 'connected')
 assert.equal(state.qq.builtin.secretSet, true)
 assert.match(state.qq.builtin.appId, /…/u, 'appId is masked in the panel payload')
 assert.equal(JSON.stringify(state).includes('super-secret'), false, 'the AppSecret never reaches the client')
-console.log('PASS builtin QQ: settings saved, token/gateway/identify handshake, masked credentials')
+// The slash-command panel is created on READY and updated in place afterwards.
+ws.dispatch('READY', { session_id: 'gateway-session' })
+await wait(30)
+assert.equal(panels.length, 1, 'command panel created')
+assert.equal(panels[0].panel.remark, 'dsh-vocab-review')
+assert.deepEqual(
+  panels[0].panel.items.map((item) => item.name),
+  ['start', 'stats', 'stop', 'help'],
+  'the panel exposes /start /stats /stop /help',
+)
+ws.dispatch('READY', { session_id: 'gateway-session' })
+await wait(30)
+assert.equal(panels.length, 1, 'an existing panel is updated, not duplicated')
+state = await stateOf(env.routes)
+assert.equal(state.qq.builtin.panel.published, true, 'the panel publish result is visible to the panel state')
+console.log('PASS builtin QQ: settings saved, token/gateway/identify handshake, masked credentials, command panel')
 
 // ── 2. Heartbeat ─────────────────────────────────────────────────────────
 await wait(140)
@@ -329,6 +359,23 @@ assert.ok(ledger.words[pendingWord].correct >= 1, 'the graded answer is recorded
 await wait(1_800)
 assert.ok(sentMessages.length > beforeAnswer, 'the next question is pushed to QQ after the turn')
 console.log('PASS builtin QQ: QQ answer is graded through the session and the next question is pushed')
+
+// ── 6b. Slash commands from the panel ────────────────────────────────────
+ws.dispatch('C2C_MESSAGE_CREATE', { id: 'msg-5', content: '/stop', author: { user_openid: 'OPENID_1' } })
+await wait(40)
+assert.ok(sentMessages[sentMessages.length - 1].body.content.includes('已停止'), '/stop stops the loop')
+assert.equal((await stateOf(env.routes)).loop, 'stopped')
+ws.dispatch('C2C_MESSAGE_CREATE', { id: 'msg-6', content: '/stats', author: { user_openid: 'OPENID_1' } })
+await wait(40)
+assert.ok(sentMessages[sentMessages.length - 1].body.content.includes('到期'), '/stats answers with the counters')
+ws.dispatch('C2C_MESSAGE_CREATE', { id: 'msg-7', content: '/help', author: { user_openid: 'OPENID_1' } })
+await wait(40)
+assert.ok(sentMessages[sentMessages.length - 1].body.content.includes('/start'), '/help lists the commands')
+ws.dispatch('C2C_MESSAGE_CREATE', { id: 'msg-8', content: '/start', author: { user_openid: 'OPENID_1' } })
+await wait(40)
+assert.match(sentMessages[sentMessages.length - 1].body.content, /^Q: /u, '/start pushes the next question')
+assert.equal((await stateOf(env.routes)).loop, 'running')
+console.log('PASS builtin QQ: /stop /stats /help /start from the command panel are handled')
 
 // ── 7. Dedupe + disconnect status ────────────────────────────────────────
 const promptsBefore = env.prompts.length

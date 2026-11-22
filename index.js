@@ -811,6 +811,7 @@ export function apply(ctx, config) {
       error: status ? status.error : '',
       connectedAt: status ? status.connectedAt : null,
       lastMessageAt: status ? status.lastMessageAt : null,
+      panel: status ? status.panel : null,
       target: state.qqTarget ? { scope: state.qqTarget.scope, at: state.qqTarget.at } : null,
     }
   }
@@ -836,7 +837,12 @@ export function apply(ctx, config) {
   const QQ_STATS = /^(?:统计|状态|进度|stats|status)[\s!！。.]*$/iu
 
   async function handleQqCommand(text, message) {
-    if (QQ_START.test(text)) {
+    const raw = String(text || '').trim()
+    // QQ's slash-command panel fills the box with "/start" etc.; the Chinese
+    // phrases keep working exactly like before.
+    const command = raw.startsWith('/') ? raw.replace(/^\/+/u, '').trim() : raw
+    if (!command) return false
+    if (QQ_START.test(command)) {
       const target = routedSessionId() || selectedSessionId() || ''
       if (!target) {
         await sendToQqChat(message, '还没有可用的对话：请先在 DSH 网页里打开或新建一个会话。')
@@ -856,17 +862,24 @@ export function apply(ctx, config) {
       if (head) await sendToQqChat(message, questionLine(head))
       return true
     }
-    if (QQ_STOP.test(text)) {
+    if (QQ_STOP.test(command)) {
       stopLoop()
       await sendToQqChat(message, '已停止，队列保留。回「开始背单词」继续。')
       return true
     }
-    if (QQ_STATS.test(text)) {
+    if (QQ_STATS.test(command)) {
       const summary = publicState()
       const next = summary.nextDueAt ? `，下一个到期 ${clockText(summary.nextDueAt)}` : ''
       await sendToQqChat(
         message,
         `到期 ${summary.dueNow} 个 · 错词 ${summary.wrongCount} · 模糊 ${summary.fuzzyCount} · 共 ${summary.total} 词${next}。今日 ${summary.counters.total} 题。`,
+      )
+      return true
+    }
+    if (/^(?:help|\?|命令|帮助)$/iu.test(command)) {
+      await sendToQqChat(
+        message,
+        '可用命令：/start 开始背单词 · /stats 统计 · /stop 停止 · /help 帮助。也可以直接发图片导入单词，发中文「开始背单词 / 统计 / 停止」同样有效。',
       )
       return true
     }

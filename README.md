@@ -233,8 +233,8 @@ dsh plugin --profile <profile> add github:at3623/dsh-vocab-review
 1. 到 [q.qq.com](https://q.qq.com) 创建机器人，拿到 **AppID / AppSecret**；开通「私聊消息」和/或「群@消息」权限，把你自己加进沙箱成员（没上线前只有沙箱成员能聊）。
 2. DSH 侧栏 **单词复习** 面板 → 展开「内置 QQ 机器人」→ 填 AppID / AppSecret（接口地址默认 `https://api.sgroup.qq.com`）→ **保存并连接**。状态会依次变成「连接中 → 已连接」，AppSecret 只存本机 `settings.json`，面板只显示是否已保存。
 3. 在 QQ 里给机器人发一条消息（私聊直接发，群里 @ 它）。之后就能：
-   - 发 **「开始背单词 / 统计 / 停止」** 直接控制复习（插件自己处理，不消耗模型轮次）；
-   - **发图片**：有划线的单词表 → 导入划线词；没划线的文章 → 按考试高频词导入（这正是桥接模式做不到的）。**图片导入只入库、不自动开考**：识别结果回到 QQ 后，你再发「开始背单词」（或「开启复习」）才开始出题，连发多张图也不会自动一轮轮问下去；
+   - 用 **快捷指令面板**：在 QQ 输入 `/` 会看到 `/start`（开始背单词复习）、`/stats`（查看到期与错词）、`/stop`（停止复习，队列保留）、`/help`（查看可用命令），点一下即可；直接打中文「开始背单词 / 统计 / 停止」效果相同，插件自己处理、不消耗模型轮次；
+   - **发图片**：有划线的单词表 → 导入划线词；没划线的文章 → 按考试高频词导入（这正是桥接模式做不到的）。**图片导入只入库、不自动开考**：识别结果回到 QQ 后，你再发「开始背单词」（或 `/start`）才开始出题，连发多张图也不会自动一轮轮问下去；
    - 直接回复答案 → 交给绑定会话里的模型批改 → 插件记录并推下一题；
    - 到期提醒、自动停下说明也会推到同一个 QQ 聊天。
 4. 面板上的 QQ 行显示「内置 QQ 已连接」；连不上时把错误显示在面板和诊断区。
@@ -521,8 +521,8 @@ The built-in client uses the official QQ Open Platform protocol with Node's own 
 1. Create a bot at [q.qq.com](https://q.qq.com), copy its **AppID / AppSecret**, enable the 私聊消息 and/or 群@消息 permissions, and add yourself to the sandbox members (only sandbox members can chat before release).
 2. In the DSH sidebar **Vocabulary review** panel, open **Built-in QQ bot**, enter AppID / AppSecret (API base defaults to `https://api.sgroup.qq.com`) and press **Save & connect**. The status becomes “connecting → connected”. The secret is stored only in the local `settings.json`; the panel never shows it again.
 3. Send the bot one message in QQ (private chat directly, or @ it in a group). Then you can:
-   - send **开始背单词 / 统计 / 停止** to control the loop (handled by the plugin itself, no model turn);
-   - **send an image**: an underlined word list imports its underlined words; a plain article imports its exam-high-frequency words — the thing the bridge cannot do. **An image import only fills the ledger and never auto-starts the review**: after the summary comes back to QQ, send 「开始背单词」 (or 「开启复习」) to begin asking questions, so importing several images in a row cannot start a runaway loop;
+   - use the **slash-command panel**: typing `/` in QQ shows `/start` (start the review), `/stats` (due + wrong counts), `/stop` (stop, keep the queue) and `/help`; tapping an entry fills the box. Typing 开始背单词 / 统计 / 停止 works the same, and the plugin handles these without a model turn;
+   - **send an image**: an underlined word list imports its underlined words; a plain article imports its exam-high-frequency words — the thing the bridge cannot do. **An image import only fills the ledger and never auto-starts the review**: after the summary comes back to QQ, send 「开始背单词」 (or `/start`) to begin asking questions, so importing several images in a row cannot start a runaway loop;
    - reply with an answer → the model in the selected session grades it → the plugin records it and pushes the next question;
    - due reminders and automatic-stop notes arrive in the same QQ chat.
 

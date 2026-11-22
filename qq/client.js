@@ -18,6 +18,16 @@ const MAX_CHUNKS = 4
 const MAX_CHUNK_CHARS = 900
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024
 const HANDSHAKE_TIMEOUT_MS = 30_000
+// QQ 快捷指令面板 (the list the QQ client shows when the user types "/").
+// Platform limits: at most 5 items, and a CJK character counts as two of the
+// documented name/description characters.
+const PANEL_REMARK = 'dsh-vocab-review'
+const PANEL_ITEMS = Object.freeze([
+  { type: 'command', name: 'start', desc: '开始背单词复习' },
+  { type: 'command', name: 'stats', desc: '查看到期与错词' },
+  { type: 'command', name: 'stop', desc: '停止复习，队列保留' },
+  { type: 'command', name: 'help', desc: '查看可用命令' },
+])
 
 function splitText(text, size, maxChunks) {
   const parts = []
@@ -60,6 +70,7 @@ export class QqClient {
     this.error = ''
     this.connectedAt = null
     this.lastMessageAt = null
+    this.panel = { published: false, at: null, error: '' }
     // msg_seq bookkeeping: QQ dedupes (msg_id, msg_seq), so every passive reply
     // for one inbound message needs the next sequence number. A Map survives the
     // callers that copy the target object around.
@@ -74,6 +85,7 @@ export class QqClient {
       connectedAt: this.connectedAt,
       lastMessageAt: this.lastMessageAt,
       apiBase: this.apiBase,
+      panel: { ...this.panel },
     }
   }
 
@@ -262,6 +274,16 @@ export class QqClient {
   }
 
   dispatch(type, data) {
+    if (type === 'READY') {
+      // Publish the slash-command panel once the gateway is up. Missing panel
+      // permission is not fatal: commands still work when typed.
+      void this.publishPanel().catch((error) => {
+        this.logger?.warn?.(
+          `dsh-vocab-review: [qq] command panel skipped: ${String(error && error.message ? error.message : error)}`,
+        )
+      })
+      return
+    }
     if (!data || typeof data !== 'object') return
     if (type === 'C2C_MESSAGE_CREATE') {
       this.onMessage?.(normalizeMessage('c2c', data))
@@ -269,6 +291,41 @@ export class QqClient {
     }
     if (type === 'GROUP_AT_MESSAGE_CREATE') {
       this.onMessage?.(normalizeMessage('group', data))
+    }
+  }
+
+  /**
+   * Keep one QQ command panel for this bot (the "/" shortcut list): create it
+   * on the first connection, update it in place afterwards so a restart does
+   * not add duplicates.
+   */
+  async publishPanel() {
+    try {
+      const listed = await this.api('GET', '/v2/panels?scope=c2c&limit=50')
+      const records = listed && Array.isArray(listed.records) ? listed.records : []
+      const existing = records.find(
+        (record) =>
+          record &&
+          record.scope === 'c2c' &&
+          record.target_type === 'all' &&
+          record.panel &&
+          record.panel.remark === PANEL_REMARK,
+      )
+      const panel = { items: PANEL_ITEMS.map((item) => ({ ...item })), remark: PANEL_REMARK }
+      if (existing && existing.panel_id) {
+        await this.api('PUT', `/v2/panels/${encodeURIComponent(existing.panel_id)}`, { panel })
+      } else {
+        await this.api('POST', '/v2/panels', { scope: 'c2c', target_type: 'all', panel })
+      }
+      this.panel = { published: true, at: Date.now(), error: '' }
+      this.logger?.info?.('dsh-vocab-review: [qq] command panel published')
+    } catch (error) {
+      this.panel = {
+        published: false,
+        at: Date.now(),
+        error: String(error && error.message ? error.message : error),
+      }
+      throw error
     }
   }
 
