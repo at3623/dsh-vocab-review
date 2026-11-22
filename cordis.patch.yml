@@ -10,6 +10,10 @@
 # verifyAnswers: the plugin re-checks every model ✅ against the meaning it
 # stored for that word and schedules a mismatch as wrong. Set it to false to
 # trust the model's grading alone (the pre-1.4 behaviour).
+#
+# articleMaxWords: a plain article image (no underlines) goes through
+# vocab_import_article; the model picks the useful words, basic everyday words
+# are filtered out, and at most this many are added per import.
 - insert:
     - id: vocab-review
       name: dsh-vocab-review
@@ -19,6 +23,7 @@
         wrongInject: 2
         retryDelayMinutes: 5
         verifyAnswers: true
+        articleMaxWords: 20
         ladderMinutes: [30, 180, 720, 2880, 10080, 43200]
         highMultiplier: 0.7
         lowMultiplier: 1.6

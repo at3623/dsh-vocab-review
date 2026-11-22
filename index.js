@@ -40,6 +40,9 @@ const DEFAULTS = {
   // A mismatch is scheduled as wrong: the model alone must not decide that a
   // different meaning is an acceptable answer.
   verifyAnswers: true,
+  // A plain article image yields many candidates; cap how many words one
+  // article import may add (basic everyday words are filtered out entirely).
+  articleMaxWords: 20,
   ladderMinutes: [30, 180, 720, 2880, 10080, 43200], // 30m, 3h, 12h, 2d, 7d, 30d
   highMultiplier: 0.7,
   lowMultiplier: 1.6,
@@ -121,6 +124,7 @@ function resolveConfig(config) {
     wrongInject: clampInt(raw.wrongInject, 0, 10, DEFAULTS.wrongInject),
     retryDelayMinutes: clampNum(raw.retryDelayMinutes, 0.1, 1440, DEFAULTS.retryDelayMinutes),
     verifyAnswers: raw.verifyAnswers === false ? false : DEFAULTS.verifyAnswers,
+    articleMaxWords: clampInt(raw.articleMaxWords, 1, 100, DEFAULTS.articleMaxWords),
     ladderMinutes: ladder.length > 0 ? ladder : DEFAULTS.ladderMinutes.slice(),
     highMultiplier: clampNum(raw.highMultiplier, 0.1, 3, DEFAULTS.highMultiplier),
     lowMultiplier: clampNum(raw.lowMultiplier, 0.5, 5, DEFAULTS.lowMultiplier),
@@ -346,6 +350,7 @@ export function apply(ctx, config) {
       correct: Number.isFinite(value.correct) ? value.correct : 0,
       errors: Number.isFinite(value.errors) ? value.errors : 0,
       fuzzy: Number.isFinite(value.fuzzy) ? value.fuzzy : 0,
+      source: value.source === 'article' ? 'article' : 'list',
     }
   }
 
@@ -1143,17 +1148,45 @@ export function apply(ctx, config) {
   }
 
   // ── Image ingestion (the model reads the image; the plugin keeps words) ──
-  function importWords(raw, sessionId) {
+  // Two entry points share this:
+  // - a worksheet image with underlined words (every word is wanted);
+  // - a plain article image (only the useful words, basic everyday words
+  //   filtered out and the batch capped, and the loop does NOT auto-start so
+  //   the user can see the picked list first).
+  function importWords(raw, sessionId, options = {}) {
+    const article = options.article === true
     const parsed = splitWords(raw)
     if (parsed.length === 0) return { ok: false, error: 'no-words', words: [], queue: [] }
     const now = Date.now()
+    const seen = new Set()
+    const candidates = []
     for (const item of parsed) {
+      if (seen.has(item.word)) continue
+      seen.add(item.word)
+      candidates.push(item)
+    }
+    const skippedBasic = []
+    const existingKeys = []
+    const fresh = []
+    for (const item of candidates) {
+      if (article && HIGH_FREQUENCY.has(item.word)) {
+        skippedBasic.push(item.word)
+        continue
+      }
       const existing = state.words[item.word]
       if (existing) {
         existing.freq = classifyFrequency(item.word, item.freq || existing.freq)
         existing.display = item.word
+        if (article) existing.source = 'article'
+        existingKeys.push(item.word)
         continue
       }
+      fresh.push(item)
+    }
+    const cap = article ? cfg.articleMaxWords : Number.POSITIVE_INFINITY
+    const accepted = fresh.slice(0, cap)
+    const overLimit = fresh.slice(cap).map((item) => item.word)
+    for (const item of accepted) {
       state.words[item.word] = {
         word: item.word,
         display: item.word,
@@ -1170,10 +1203,17 @@ export function apply(ctx, config) {
         correct: 0,
         errors: 0,
         fuzzy: 0,
+        source: article ? 'article' : 'list',
       }
     }
-    const keys = []
-    for (const item of parsed) if (!keys.includes(item.word)) keys.push(item.word)
+    const included = new Set([...existingKeys, ...accepted.map((item) => item.word)])
+    const keys = candidates.map((item) => item.word).filter((word) => included.has(word))
+    const meta = {
+      skippedBasic,
+      overLimit,
+      existing: existingKeys,
+      parsed: candidates.length,
+    }
     if (typeof sessionId === 'string' && sessionId) state.activeSessionId = sessionId
     // Route the review to the selected conversation. When the words were
     // imported from a different session, the queue waits for Start there.
@@ -1186,24 +1226,43 @@ export function apply(ctx, config) {
     state.quota = null
     state.idleReason = null
     const sameSession = Boolean(sessionId) && routed === sessionId
+    // An article import never starts the loop: the user should see which words
+    // were picked (and which basic ones were dropped) before being quizzed.
+    if (article) {
+      state.loop = 'stopped'
+      saveLedger()
+      return {
+        ok: true,
+        blocked: false,
+        deferred: !sameSession,
+        article: true,
+        words: keys,
+        added: accepted.map((item) => item.word),
+        queue: state.queue.slice(),
+        routed,
+        ...meta,
+      }
+    }
     if (!sameSession) {
       state.loop = 'stopped'
       saveLedger()
-      return { ok: true, blocked: false, deferred: true, words: keys, queue: state.queue.slice(), routed }
+      return { ok: true, blocked: false, deferred: true, words: keys, queue: state.queue.slice(), routed, ...meta }
     }
     state.loop = 'running'
     ensureDay()
     const question = beginQuestion()
     if (!question.ok) {
-      return { ok: true, blocked: true, words: keys, queue: state.queue.slice(), quota: state.quota }
+      return { ok: true, blocked: true, words: keys, queue: state.queue.slice(), quota: state.quota, ...meta }
     }
-    return { ok: true, blocked: false, words: keys, queue: state.queue.slice(), first: question.word.word }
+    return { ok: true, blocked: false, words: keys, queue: state.queue.slice(), first: question.word.word, ...meta }
   }
 
   // ── Per-agent prompt injection ───────────────────────────────────────────
   const IMPORT_SECTION = [
     '[Vocabulary review plugin]',
-    'When the user uploads an English worksheet/word-list image, read the image, extract every underlined English word (base form only), and call vocab_import once with the words comma-separated. Never repeat or store the image; the plugin keeps only the word list.',
+    'When the user uploads an English worksheet/word-list image WITH underlined words, read the image, extract every underlined English word (base form only), and call vocab_import once with the words comma-separated. Never repeat or store the image; the plugin keeps only the word list.',
+    'When the user uploads a plain article / reading-passage / news image with NO underlines, call vocab_import_article instead: pass the useful, exam-high-frequency base-form words from the text (append :high to words that repeat or are core vocabulary), never every word. The plugin filters basic words, caps the batch, and does not start the loop.',
+    'When the user pastes an article as text, extract its useful words the same way and call vocab_import_article; a plain word list still goes to vocab_import.',
     'When the user asks to start/continue vocabulary review, call vocab_start instead of inventing words.',
   ].join('\n')
 
@@ -1234,7 +1293,7 @@ export function apply(ctx, config) {
   // QQ idle: the loop is not running, but this chat still speaks vocabulary.
   const QQ_IDLE_PROTOCOL = [
     '[Vocabulary review on QQ]',
-    'This QQ conversation can run the vocabulary review. When the user asks to start or continue reviewing, call vocab_start (never invent words). To stop, call vocab_stop; for a summary, call vocab_stats; when the user pastes or lists English words, call vocab_import with them.',
+    'This QQ conversation can run the vocabulary review. When the user asks to start or continue reviewing, call vocab_start (never invent words). To stop, call vocab_stop; for a summary, call vocab_stats; when the user pastes or lists English words, call vocab_import with them; when the user pastes an article, call vocab_import_article with its useful words.',
   ].join('\n')
 
   function reviewActiveFor(agentId) {
@@ -1449,6 +1508,78 @@ export function apply(ctx, config) {
     `${PLUGIN}: vocab_import tool`,
   )
 
+  // Article images have no underlines, so the model has to choose the words.
+  // The plugin keeps the choice honest: it drops basic everyday words, caps the
+  // batch, and never starts the loop on its own — the user sees the list first.
+  ctx.effect(
+    () => ctx.tools.register({
+      name: 'vocab_import_article',
+      description:
+        'Add the useful / exam-high-frequency English words from a plain article or reading-passage image (NO underlines) to the vocabulary ledger. Read the image and pass comma-separated base-form words that a Chinese learner should memorise; append :high to words that repeat in the article or are core vocabulary. The plugin drops function/basic everyday words (the, is, good, school…), removes duplicates, caps the batch at articleMaxWords, and does NOT start a review loop — reply with the picked list briefly, then let the user press Start (or say 开始背单词). Never repeat or store the image.',
+      parameters: {
+        type: 'object',
+        properties: {
+          words: {
+            type: 'string',
+            description: 'Comma-separated base-form words from the article, e.g. "abandon, benefit:high, cautious".',
+          },
+          frequency: {
+            type: 'string',
+            description: 'Optional extra hints: "high", "low", "normal", or comma-separated word:high pairs.',
+          },
+        },
+        required: ['words'],
+        additionalProperties: false,
+      },
+      output: toolOutput,
+      async execute(args, exec) {
+        const raw = [args && args.words ? args.words : '', args && args.frequency ? args.frequency : ''].filter(Boolean).join(',')
+        const result = importWords(raw, sessionIdOfAgent(exec && exec.agent), { article: true })
+        if (!result.ok) {
+          return {
+            ok: false,
+            message: 'No English words were recognised in that image. Ask for a clearer photo, or for the article text pasted into the chat.',
+            words: [],
+            queue: [],
+          }
+        }
+        const lines = []
+        if (result.added.length > 0) {
+          lines.push(`Added ${result.added.length} article word(s) to the vocabulary ledger: ${result.added.join(', ')}.`)
+        } else if (result.existing.length > 0) {
+          lines.push('Those words are already in the vocabulary ledger; nothing new was added.')
+        } else {
+          lines.push('Nothing worth adding: every candidate was a basic everyday word.')
+        }
+        if (result.skippedBasic.length > 0) {
+          const shown = result.skippedBasic.slice(0, 12).join(', ')
+          lines.push(`Filtered out ${result.skippedBasic.length} basic word(s): ${shown}${result.skippedBasic.length > 12 ? '…' : ''}.`)
+        }
+        if (result.overLimit.length > 0) {
+          const shown = result.overLimit.slice(0, 8).join(', ')
+          lines.push(`${result.overLimit.length} word(s) exceeded the per-article cap (${cfg.articleMaxWords}) and were skipped: ${shown}${result.overLimit.length > 8 ? '…' : ''}.`)
+        }
+        if (result.existing.length > 0 && result.added.length > 0) {
+          lines.push(`Already known: ${result.existing.slice(0, 10).join(', ')}.`)
+        }
+        lines.push(
+          `The review is NOT running. Reply with the picked list in one or two short lines, then tell the user to press Start in the Vocabulary review panel or say 「开始背单词」. QUEUE: ${result.queue.join(', ') || '(empty)'}`,
+        )
+        return {
+          ok: true,
+          message: lines.join(' '),
+          words: result.words,
+          added: result.added,
+          skippedBasic: result.skippedBasic,
+          overLimit: result.overLimit,
+          existing: result.existing,
+          queue: result.queue,
+        }
+      },
+    }),
+    `${PLUGIN}: vocab_import_article tool`,
+  )
+
   ctx.effect(
     () => ctx.tools.register({
       name: 'vocab_start',
@@ -1462,7 +1593,7 @@ export function apply(ctx, config) {
           if (result.error === 'quota') {
             return { ok: false, message: `${result.quota && result.quota.message ? result.quota.message : '今日已达上限'}. Queue kept: ${result.queue.join(', ')}` }
           }
-          return { ok: false, message: 'There are no words in the review ledger yet. Upload a worksheet image first and call vocab_import.' }
+          return { ok: false, message: 'There are no words in the review ledger yet. Upload a worksheet image and call vocab_import, or an article image and call vocab_import_article.' }
         }
         const routed = routedSessionId()
         if (routed && callerId && routed !== callerId) {
@@ -2074,7 +2205,9 @@ export function apply(ctx, config) {
             const raw = [body && body.words !== undefined ? body.words : '', body && body.frequency ? body.frequency : '']
               .filter(Boolean)
               .join(',')
-            const result = importWords(raw, body && typeof body.sessionId === 'string' ? body.sessionId : undefined)
+            const result = importWords(raw, body && typeof body.sessionId === 'string' ? body.sessionId : undefined, {
+              article: Boolean(body && body.mode === 'article'),
+            })
             writeJson(res, 200, {
               ok: result.ok,
               value: {

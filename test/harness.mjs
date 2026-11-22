@@ -738,5 +738,62 @@ assert.equal(partAfter.words.genuine.errors, 0)
 assert.equal(partAfter.lastConflict, null)
 console.log('PASS partial: a short Chinese rewording of the stored gloss is not vetoed')
 
+// ── 22. Article image: basic words filtered, batch capped, loop not started ─
+const artDir = join(root, 'article')
+const artEnv = freshEnv(artDir, { articleMaxWords: 5 })
+const art = await artEnv.tools.get('vocab_import_article').execute(
+  { words: 'abandon, the, benefit, is, cautious, genuine:high, grocery, promote, school, theory' },
+  { agent: artEnv.agent },
+)
+assert.equal(art.ok, true)
+assert.deepEqual(art.added, ['abandon', 'benefit', 'cautious', 'genuine', 'grocery'], 'the cap keeps the model order')
+assert.deepEqual(art.skippedBasic, ['the', 'is', 'school'], 'basic everyday words are filtered out')
+assert.deepEqual(art.overLimit, ['promote', 'theory'], 'the per-article cap is respected')
+assert.ok(art.message.includes('Added 5'))
+assert.ok(art.message.includes('Filtered out 3'))
+assert.ok(art.message.includes('开始背单词'))
+assert.equal(artEnv.prompts.length, 0, 'an article import never starts the review loop')
+const artLedger = loadLedger(artDir)
+assert.equal(artLedger.loop, 'stopped')
+assert.deepEqual(artLedger.queue, ['abandon', 'benefit', 'cautious', 'genuine', 'grocery'])
+assert.equal(artLedger.words.abandon.source, 'article')
+assert.equal(artLedger.words.genuine.source, 'article')
+assert.equal(artLedger.words.genuine.freq, 'high', 'a :high hint is kept')
+assert.equal(artLedger.words.abandon.freq, 'normal', 'unmarked words get the normal frequency')
+assert.equal(artLedger.words.the, undefined, 'the basic word never enters the ledger')
+const artStarted = await post(artEnv, 'start')
+assert.equal(artStarted.ok, true, 'Start after an article import begins the review')
+assert.equal(artEnv.prompts.length, 1)
+const artProtocol = artEnv.sections[0].text()
+assert.ok(artProtocol.includes('vocab_import_article'), 'the protocol tells the model about the article path')
+assert.ok(artProtocol.includes('🤔'), 'the protocol still documents the three grades')
+console.log('PASS article image: basic words dropped, batch capped, loop waits for Start, protocol updated')
+
+// ── 23. Article image: only basic words / only known words ──────────────
+const artBasicDir = join(root, 'article-basic')
+const artBasicEnv = freshEnv(artBasicDir)
+const artBasic = await artBasicEnv.tools.get('vocab_import_article').execute(
+  { words: 'the, is, school' },
+  { agent: artBasicEnv.agent },
+)
+assert.equal(artBasic.ok, true)
+assert.deepEqual(artBasic.added, [])
+assert.equal(artBasic.skippedBasic.length, 3)
+assert.ok(artBasic.message.includes('basic everyday word'))
+assert.equal(loadLedger(artBasicDir).queue.length, 0)
+const artKnown = await artBasicEnv.tools.get('vocab_import_article').execute(
+  { words: 'theory, the' },
+  { agent: artBasicEnv.agent },
+)
+assert.deepEqual(artKnown.added, ['theory'])
+const artAgain = await artBasicEnv.tools.get('vocab_import_article').execute(
+  { words: 'theory, cautious' },
+  { agent: artBasicEnv.agent },
+)
+assert.deepEqual(artAgain.added, ['cautious'])
+assert.deepEqual(artAgain.existing, ['theory'])
+assert.ok(artAgain.message.includes('Already known'))
+console.log('PASS article edge cases: all-basic imports explain themselves, known words are reported not re-added')
+
 rmSync(root, { recursive: true, force: true })
 console.log('\nALL CHECKS PASSED')
