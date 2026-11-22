@@ -743,7 +743,13 @@ export function apply(ctx, config) {
       const target = { ...state.qqTarget }
       return qqBuiltin.client
         .sendText(target, body)
-        .then(() => ({ ok: true }))
+        .then(() => {
+          if (state.qqTarget && state.qqTarget.id === target.id && state.qqTarget.msgId === target.msgId) {
+            state.qqTarget.msgSeq = Number(target.msgSeq) || 0
+            saveLedger()
+          }
+          return { ok: true }
+        })
         .catch((error) => ({ ok: false, error: String(error && error.message ? error.message : error) }))
     }
     if (qqBuiltinConnected()) {
@@ -809,9 +815,17 @@ export function apply(ctx, config) {
   function sendToQqChat(message, text) {
     if (!qqBuiltin) return Promise.resolve()
     const target = { scope: message.scope, id: message.targetId, msgId: message.messageId, msgSeq: 0 }
-    return qqBuiltin.client.sendText(target, text).catch((error) => {
-      ctx.logger?.warn?.(`${PLUGIN}: [qq] reply failed: ${String(error && error.message ? error.message : error)}`)
-    })
+    return qqBuiltin.client
+      .sendText(target, text)
+      .then(() => {
+        if (state.qqTarget && state.qqTarget.id === target.id && state.qqTarget.msgId === target.msgId) {
+          state.qqTarget.msgSeq = Number(target.msgSeq) || 0
+          saveLedger()
+        }
+      })
+      .catch((error) => {
+        ctx.logger?.warn?.(`${PLUGIN}: [qq] reply failed: ${String(error && error.message ? error.message : error)}`)
+      })
   }
 
   const QQ_START = /^(?:开始|继续|开始背单词|开始复习|继续复习|start|continue)[\s!！。.]*$/iu

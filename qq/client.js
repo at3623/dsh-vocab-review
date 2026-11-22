@@ -60,6 +60,10 @@ export class QqClient {
     this.error = ''
     this.connectedAt = null
     this.lastMessageAt = null
+    // msg_seq bookkeeping: QQ dedupes (msg_id, msg_seq), so every passive reply
+    // for one inbound message needs the next sequence number. A Map survives the
+    // callers that copy the target object around.
+    this.msgSeqByMessage = new Map()
   }
 
   status() {
@@ -332,8 +336,9 @@ export class QqClient {
 
   /**
    * Send text to one chat. `target` = { scope, id, msgId?, msgSeq? }.
-   * A passive reply (msg_id) is preferred; after the platform's 4-reply budget
-   * for one inbound message the client falls back to an active push.
+   * A passive reply (msg_id) is preferred; every reply for the same msg_id gets
+   * the next msg_seq (QQ dedupes repeats with 40054005), and after the
+   * platform's 4-reply budget the client falls back to an active push.
    */
   async sendText(target, text) {
     const body = String(text == null ? '' : text).trim()
@@ -344,13 +349,26 @@ export class QqClient {
     const route = `/v2/${scope === 'group' ? 'groups' : 'users'}/${encodeURIComponent(id)}/messages`
     const chunks = splitText(body, MAX_CHUNK_CHARS, MAX_CHUNKS)
     for (const chunk of chunks) {
-      if (target.msgId) {
-        target.msgSeq = (Number(target.msgSeq) || 0) + 1
+      const msgId = target && target.msgId ? String(target.msgId) : ''
+      let seq = 1
+      let passive = false
+      if (msgId) {
+        const known = Math.max(
+          Number(this.msgSeqByMessage.get(msgId)) || 0,
+          Number(target.msgSeq) || 0,
+        )
+        seq = known + 1
+        passive = seq <= 4
+        if (passive) this.msgSeqByMessage.set(msgId, seq)
       }
-      const passive = Boolean(target.msgId) && target.msgSeq <= 4
-      const payload = { content: chunk, msg_type: 0, msg_seq: passive ? target.msgSeq : 1 }
-      if (passive) payload.msg_id = target.msgId
+      const payload = { content: chunk, msg_type: 0, msg_seq: passive ? seq : 1 }
+      if (passive) payload.msg_id = msgId
       await this.api('POST', route, payload)
+      if (target) target.msgSeq = passive ? seq : 0
+    }
+    if (this.msgSeqByMessage.size > 200) {
+      const oldest = this.msgSeqByMessage.keys().next().value
+      if (oldest !== undefined) this.msgSeqByMessage.delete(oldest)
     }
     return { ok: true, parts: chunks.length }
   }

@@ -327,5 +327,33 @@ state = await stateOf(env.routes)
 assert.notEqual(state.qq.builtin.state, 'connected')
 console.log('PASS builtin QQ: duplicate message ids are ignored, disconnect and disable are reflected')
 
+// ── 8. msg_seq: one unique sequence per inbound message id ───────────────
+const { QqClient } = await import('../qq/client.js')
+const seqClient = new QqClient({
+  appId: 'a',
+  appSecret: 'b',
+  apiBase: 'https://api.test',
+  fetchImpl: fakeFetch,
+  WebSocketImpl: FakeWs,
+})
+const seqTarget = { scope: 'c2c', id: 'OPENID_SEQ', msgId: 'msg-seq', msgSeq: 0 }
+await seqClient.sendText(seqTarget, 'one')
+// A caller that copies the target (the plugin does) must not reset the counter.
+await seqClient.sendText({ ...seqTarget, msgSeq: 0 }, 'two')
+await seqClient.sendText(seqTarget, 'three')
+await seqClient.sendText(seqTarget, 'four')
+const seqBodies = sentMessages.filter((message) => message.url.includes('OPENID_SEQ')).map((message) => message.body)
+assert.deepEqual(
+  seqBodies.map((body) => body.msg_seq),
+  [1, 2, 3, 4],
+  'each passive reply gets the next msg_seq (QQ dedupes repeats with 40054005)',
+)
+assert.ok(seqBodies.every((body) => body.msg_id === 'msg-seq'))
+await seqClient.sendText(seqTarget, 'five')
+const fifth = sentMessages.filter((message) => message.url.includes('OPENID_SEQ')).at(-1).body
+assert.equal(fifth.msg_id, undefined, 'after the 4-reply budget it falls back to an active push')
+assert.equal(fifth.msg_seq, 1)
+console.log('PASS builtin QQ: msg_seq increments per inbound msg_id and falls back to a push after 4 replies')
+
 rmSync(root, { recursive: true, force: true })
 console.log('\nALL QQ CHECKS PASSED')

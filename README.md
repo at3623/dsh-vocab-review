@@ -242,6 +242,7 @@ dsh plugin --profile <profile> add github:at3623/dsh-vocab-review
 **限制与注意事项**
 
 - 同一个 QQ 机器人 AppID **只能有一个网关连接**：内置通道和 `dsh-qq-bot` 不要同时用同一个 AppID（会互相踢下线）。要用两个就建两个机器人应用。
+- 被动回复受平台限制：**同一个入站消息最多回 4 条**（每条用递增的 `msg_seq`，QQ 对重复的 `msg_seq` 会报 `40054005 消息被去重`）。插件会自动递增；超过 4 条后改走主动推送。
 - AppSecret 明文保存在本机 `settings.json`（与「数据只在本机」一致，不上传）；导出/分享配置前记得清掉。
 - 只做「私聊 + 群 @」的文字/图片收发：没有按钮、没有流式更新、没有多机器人/多会话绑定——这些是通用聊天机器人的能力，背单词用不上。
 - 官方平台权限/审核规则可能变化；连不上时先看面板错误与 DSH 日志里的 `[qq]` 行。
@@ -525,7 +526,7 @@ The built-in client uses the official QQ Open Platform protocol with Node's own 
    - reply with an answer → the model in the selected session grades it → the plugin records it and pushes the next question;
    - due reminders and automatic-stop notes arrive in the same QQ chat.
 
-Limits: one QQ bot app can hold only one gateway connection (do not run the built-in client and `dsh-qq-bot` on the same AppID); the AppSecret is plain text in the local `settings.json`; only C2C + group @ text/images (no buttons, no streaming, no multi-chat bindings); if the platform changes permissions or the connection fails, the panel error and the `[qq]` log lines show why.
+Limits: one QQ bot app can hold only one gateway connection (do not run the built-in client and `dsh-qq-bot` on the same AppID); passive replies are limited to **4 per inbound message** and every reply needs an increasing `msg_seq` (QQ rejects duplicates with `40054005`), which the client handles automatically before falling back to an active push; the AppSecret is plain text in the local `settings.json`; only C2C + group @ text/images (no buttons, no streaming, no multi-chat bindings); if the platform changes permissions or the connection fails, the panel error and the `[qq]` log lines show why.
 
 ### Bridge to `@hualiong/dsh-qq-bot`
 
