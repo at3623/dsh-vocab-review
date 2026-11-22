@@ -1,5 +1,6 @@
 // Load client.js with mocked window/React and call the plugin's apply().
 // Catches client-half apply errors without a browser.
+import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
@@ -25,6 +26,12 @@ globalThis.window = {
     load(module) {
       plugin = module.factory((name) => {
         if (name === 'react') return React
+        if (name === '@deepseek-ai/dsh-client-ui-primitives') {
+          return {
+            MenuItemButton: () => null,
+            IconLinkOutlineRegular: () => null,
+          }
+        }
         throw new Error(`unexpected require ${name}`)
       })
     },
@@ -71,9 +78,14 @@ const ctx = {
 
 try {
   plugin.apply(ctx)
+  assert.ok(
+    registrations.some((entry) => entry[0] === 'register' && entry[1] === 'sidebar.workspaces.session.menu.item'),
+    'session context menu item registered',
+  )
   console.log('CLIENT APPLY OK')
   console.log(registrations.map((entry) => entry.join(' ')).join('\n'))
   console.log('inject declared:', plugin.inject)
+  console.log('PASS session menu registration')
 } catch (error) {
   console.error('CLIENT APPLY FAILED:', error && error.stack ? error.stack : error)
   process.exitCode = 1

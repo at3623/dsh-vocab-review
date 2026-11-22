@@ -216,7 +216,7 @@ dsh plugin --profile <profile> add github:at3623/dsh-vocab-review
 
 ### 对话选择器
 
-面板下拉列出你已有的 DSH 对话（标题）。选中后：
+面板下拉列出你已有的 DSH 对话（标题）；也可以直接在**侧栏对话的右键菜单**里点 **「设为复习对话」**（已选中的会显示「已是复习对话」），两条路径等价。选中后：
 
 - `selectedSessionId` 写入 `settings.json`，刷新页面、重启 Host 都还在；
 - 所有复习提示词（`开始词汇复习` / `继续复习`）只投给**那一个**对话，不会跑到主对话；
@@ -502,7 +502,7 @@ The plugin registers a left-sidebar icon (`sidebar.panellist`, id `vocab-review`
 
 ## Conversation selector (req. 7)
 
-The panel has a dropdown listing the user's existing DSH conversations (title only). The Host builds it from `sessionController.list()` and reads each row's `projections.values.title`, filters `origin: 'subagent'` / `parentSessionId` rows, and drops every id in `workspaceRegistry.archivedSessionIds`. Selecting a conversation:
+The panel has a dropdown listing the user's existing DSH conversations (title only); the sidebar session **context menu** also offers **Use for vocabulary review** (“Vocabulary review conversation” when it already is), with the same effect. The Host builds the list from `sessionController.list()` and reads each row's `projections.values.title`, filters `origin: 'subagent'` / `parentSessionId` rows, and drops every id in `workspaceRegistry.archivedSessionIds`. Selecting a conversation:
 
 - writes `selectedSessionId` to `settings.json` (survives page reload and Host restart);
 - routes every vocabulary prompt (`开始词汇复习`, `继续复习`) through `sessionController.prompt({ sessionId })` to that conversation — never to the main conversation;

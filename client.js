@@ -115,6 +115,8 @@ window.__ModuleLoader__.load({
       qqNoTarget: 'Send the bot a message in QQ once so it knows where to reply.',
       qqBuiltinHint:
         'Create a bot on q.qq.com, copy its AppID / AppSecret, enable 私聊/群@ messages and add yourself to the sandbox. The secret is stored locally in settings.json; one QQ bot can only hold one gateway connection, so disable dsh-qq-bot for the same AppID.',
+      menuBindReview: 'Use for vocabulary review',
+      menuSelectedReview: 'Vocabulary review conversation',
     }
     const ZH = {
       title: '单词复习',
@@ -210,6 +212,8 @@ window.__ModuleLoader__.load({
       qqNoTarget: '先在 QQ 里给机器人发一条消息，它才知道往哪回。',
       qqBuiltinHint:
         '在 q.qq.com 创建机器人，复制 AppID / AppSecret，开通「私聊/群@消息」权限并把你自己加入沙箱。Secret 只存在本机 settings.json；同一个机器人只能有一个网关连接，若同时用 dsh-qq-bot 请换成另一个 AppID。',
+      menuBindReview: '设为复习对话',
+      menuSelectedReview: '已是复习对话',
     }
 
     let clientCtx = null
@@ -1114,6 +1118,48 @@ window.__ModuleLoader__.load({
         }
         registerSlot('sidebar.panellist', { name: 'sidebar.panellist', id: 'vocab-review', order: 20, label: panelLabel }, Icon)
         registerSlot('main', { name: 'main', key: 'vocab-review' }, Panel)
+
+        // Right-click menu on a sidebar conversation: pin that conversation as
+        // the review target (same effect as the panel's conversation dropdown).
+        // The primitives module is optional: a missing one must not break the
+        // panel registrations above.
+        const MENU_SLOT = 'sidebar.workspaces.session.menu.item'
+        try {
+          const primitives = require('@deepseek-ai/dsh-client-ui-primitives')
+          if (primitives && typeof primitives.MenuItemButton === 'function') {
+            const MenuItemButton = primitives.MenuItemButton
+            const MenuIcon = primitives.IconLinkOutlineRegular
+            function ReviewMenuRow(props) {
+              const snapshot = useSnapshot()
+              const sessionId = props && props.sessionId
+              const translate = props && typeof props.t === 'function' ? props.t : (key) => key
+              const selected = Boolean(snapshot && sessionId && snapshot.selectedSessionId === sessionId)
+              const [, setMenuOpen] = props.useMenuOpenState()
+              const onSelect = () => {
+                setMenuOpen(false)
+                api('select', {
+                  method: 'POST',
+                  headers: { 'content-type': 'application/json' },
+                  body: JSON.stringify({ sessionId }),
+                })
+                  .then(publish)
+                  .catch((error) => console.warn('vocab-review: menu select failed', error))
+              }
+              return h(
+                MenuItemButton,
+                { onSelect, icon: MenuIcon ? h(MenuIcon, { size: 14 }) : undefined },
+                translate(selected ? 'menuSelectedReview' : 'menuBindReview'),
+              )
+            }
+            registerSlot(
+              MENU_SLOT,
+              { name: MENU_SLOT, id: 'vocab-review-review-target', order: 889, locale: NS },
+              ReviewMenuRow,
+            )
+          }
+        } catch (error) {
+          console.warn('vocab-review: session menu item unavailable', error)
+        }
       },
     }
   },
