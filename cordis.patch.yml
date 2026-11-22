@@ -18,6 +18,12 @@
 # examLevel: which exam's high-frequency vocabulary an article import targets —
 # gaokao | cet4 | cet6 | kaoyan | any (default CET-4). The user can override it
 # per import by naming the exam (高考/四级/六级/考研).
+#
+# The optional QQ channel is NOT implemented here: it is a bridge to the
+# third-party @hualiong/dsh-qq-bot plugin. This plugin only reads that bot's
+# state file (<DSH_HOME>/integrations/dsh-qq-bot/state.json) and calls its
+# send_qq_message tool. Install and bind the bot separately to use QQ review;
+# without it the QQ row in the panel reports that the bot is missing.
 - insert:
     - id: vocab-review
       name: dsh-vocab-review

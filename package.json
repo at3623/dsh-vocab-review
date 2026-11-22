@@ -1,7 +1,7 @@
 {
   "name": "dsh-vocab-review",
   "version": "1.6.0",
-  "description": "Underlined-word vocabulary review for DeepSeek Harness: image ingestion for both underlined worksheets and plain article images (exam high-frequency words for 高考/CET-4/CET-6/考研, basic and out-of-scope words filtered), one-word-at-a-time quiz loop that keeps going while words are due, three-tier grading (known / half-known / unknown) with plugin-side verdict verification, per-word ease factors on the spaced-repetition ladder, persistent wrong-word ledger and weak-word book with CSV/JSON/Anki export, a last-7-days trend and a diagnostics block, daily quota, due reminders, and an optional QQ chat channel through dsh-qq-bot.",
+  "description": "Underlined-word vocabulary review for DeepSeek Harness: image ingestion for both underlined worksheets and plain article images (exam high-frequency words for 高考/CET-4/CET-6/考研, basic and out-of-scope words filtered), one-word-at-a-time quiz loop that keeps going while words are due, three-tier grading (known / half-known / unknown) with plugin-side verdict verification, per-word ease factors on the spaced-repetition ladder, persistent wrong-word ledger and weak-word book with CSV/JSON/Anki export, a last-7-days trend and a diagnostics block, daily quota, due reminders, and an optional QQ channel that bridges the third-party dsh-qq-bot plugin (no QQ code bundled).",
   "type": "module",
   "license": "MIT",
   "author": "At",

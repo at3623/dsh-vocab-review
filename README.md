@@ -80,7 +80,22 @@ dsh plugin --profile <profile> add github:at3623/dsh-vocab-review
 3. 在对话里按提示回答中文释义；答完一个，插件自动问下一个。不确定就直说「好像…」，那是 `🤔` 档，会提前回来重问。
 4. 答错不要紧：错词进入错词池，按间隔阶梯自动回来重问；侧栏面板里能看到薄弱词本。
 
-要求：DSH 0.2.x、Node 22+、无额外 npm 依赖。QQ 通道是可选功能，需要再装 `@hualiong/dsh-qq-bot` 并完成绑定。
+要求：DSH 0.2.x、Node 22+，**本插件本身没有任何 npm 运行时依赖**。QQ 通道是可选功能，由第三方插件 `@hualiong/dsh-qq-bot` 提供连接，需要单独安装并完成绑定（见下文「依赖与第三方组件」）。
+
+### 依赖与第三方组件
+
+**这个插件本身没有任何 npm 运行时依赖**：读图导入、词表调度、三档判定与复核、难度因子 ease、每日限额、到期提醒、侧栏面板、ledger 存储、CSV/JSON/Anki 导出，全部是本插件自己的代码（`index.js` + `client.js` + `locale/` + `icon.svg`）。
+
+唯一借助外部组件的功能是 **QQ 通道**：QQ 登录、机器人连接、收发消息/文件都由第三方插件 [`@hualiong/dsh-qq-bot`](https://github.com/hualiong/dsh-qq-bot) 完成。本插件只做桥接，**不包含任何 QQ 协议实现，也没有把它的代码打包进来**。
+
+| 组件 | 来源 | 本插件怎么用它 | 边界 |
+| --- | --- | --- | --- |
+| `@hualiong/dsh-qq-bot`（0.4.x，MIT） | 第三方社区插件，作者 hualiong，[GitHub](https://github.com/hualiong/dsh-qq-bot) | ① 只读它写在本机的状态文件 `<DSH_HOME>/integrations/dsh-qq-bot/state.json`（`sessionId`、`target`、`ownerOpenId`）；② 只调用它注册的全局工具 `send_qq_message({ text })` | 不装它 → 面板显示「未检测到 QQ 机器人插件」，QQ 功能不可用，网页复习不受影响；不复制/不包含它的代码；不读 AppID/AppSecret；不另开 QQ 连接 |
+
+- 依赖接口只有两个、都很窄：状态文件里的 `sessionId` / `target.targetId` 决定「推给哪个会话、发到哪个 QQ」，工具名 `send_qq_message` 负责实际发送。若上游改了这两个契约，QQ 通道会失效（面板显示错误，网页复习照常）。
+- 因此本插件的 `package.json` **不声明**对它的依赖，发布包里也没有任何第三方代码；想用 QQ 就单独安装并绑定（见「QQ 通道」一节）。
+- `@hualiong/dsh-qq-bot` 自己依赖腾讯官方 `@tencent-connect/qqbot-*` 和 `qrcode`，这些依赖属于它、不属于本插件。
+- 版本对照：本插件按 `@hualiong/dsh-qq-bot` 0.4.2 的状态文件与 `send_qq_message` 工具验证过；更新该机器人后若 QQ 相关行为异常，先看面板的 QQ 错误提示。
 
 ### 复习是怎么跑起来的
 
@@ -209,11 +224,11 @@ dsh plugin --profile <profile> add github:at3623/dsh-vocab-review
 
 选中的对话被归档/删除时，自动回落到第一个可用对话。若从别的对话导入词表，队列会保存并等你在选中的对话里点开始。
 
-### QQ 通道（dsh-qq-bot）
+### QQ 通道（可选的第三方机器人插件）
 
-官方 QQ 机器人插件（`@hualiong/dsh-qq-bot`）完成绑定后，可以在 QQ 里复习同一份词表：
+QQ 功能**不是本插件实现的**，而是桥接第三方插件 `@hualiong/dsh-qq-bot`（见上文「依赖与第三方组件」）。安装该机器人插件并完成绑定后，可以在 QQ 里复习同一份词表：
 
-- 面板出现 QQ 一行：**在 QQ 上复习** = 切到 QQ 绑定的会话并置 `channel: "qq"`；**回到网页复习** = 切回原对话。
+- 面板出现 QQ 一行：**在 QQ 上复习** = 切到 QQ 绑定的会话并置 `channel: "qq"`；**回到网页复习** = 切回原对话。若未安装/未绑定，这一行会显示「未检测到 QQ 机器人插件」或「尚未绑定会话」。
 - 题目由**插件推**：通过机器人的 `send_qq_message` 工具直接发 `Q: {word}`，不依赖模型主动发言；下一题会等批改消息那一轮结束后 +1.5 秒再发，避免抢话。
 - 答案仍由**模型批改**，但插件会复核：你在 QQ 里回复 → 机器人以 `[QQ] …` 投给绑定会话 → 模型只回一行 `✅/🤔/❌ {word} = {meaning}` → 机器人转发 → 插件记录；模型给的 ✅ 若跟已存词义不符，插件仍按错处理，`🤔` 走半档。
 - 到期提醒也会推到同一个 QQ 聊天，仍受 `reminderMaxPerDay` 限制。
@@ -296,7 +311,7 @@ Underlined-word vocabulary review for DeepSeek Harness. This README is bilingual
 
 ## Install
 
-Requires DeepSeek Harness 0.2.x, Node 22+, and no extra npm dependencies. The optional QQ channel needs `@hualiong/dsh-qq-bot` installed and bound to a session.
+Requires DeepSeek Harness 0.2.x and Node 22+. **This plugin itself has no npm runtime dependencies.** The optional QQ channel is provided by the third-party `@hualiong/dsh-qq-bot` plugin, which has to be installed and bound separately (see “Dependencies & third-party components” below).
 
 **From GitHub:**
 
@@ -307,6 +322,21 @@ dsh plugin --profile <profile> add github:at3623/dsh-vocab-review
 **Local directory**: DSH → **Plugins** → **Add plugin** → select this directory, or call the Plugin Manager's `install_bundle` with the absolute path.
 
 The bundle patch inserts the `vocab-review` row; the Client half is discovered from `dsh.client` and `./client`. After a client-side update, refresh the GUI page once (or restart DSH).
+
+## Dependencies & third-party components
+
+**This plugin has no npm runtime dependencies.** Image reading/import, the word schedule, three-tier grading and verdict verification, the ease factor, daily quota, due reminders, the sidebar panel, the ledger, and the CSV/JSON/Anki exports are all implemented in this repository (`index.js` + `client.js` + `locale/` + `icon.svg`).
+
+The only external component is the **QQ channel**: QQ login, the bot connection and message/file delivery are done by the third-party plugin [`@hualiong/dsh-qq-bot`](https://github.com/hualiong/dsh-qq-bot). This plugin only bridges to it — it contains **no QQ protocol implementation and does not bundle any of the bot's code**.
+
+| Component | Source | How this plugin uses it | Boundary |
+| --- | --- | --- | --- |
+| `@hualiong/dsh-qq-bot` (0.4.x, MIT) | Third-party community plugin by hualiong, [GitHub](https://github.com/hualiong/dsh-qq-bot) | ① reads the bot's local state file `<DSH_HOME>/integrations/dsh-qq-bot/state.json` (`sessionId`, `target`, `ownerOpenId`); ② calls the global tool `send_qq_message({ text })` the bot registers | Without the bot the panel says “QQ bot plugin not detected” and QQ review is unavailable; the bot's code is not copied or bundled; no AppID/AppSecret is read; no second QQ connection is opened |
+
+- The contract is two narrow interfaces: `sessionId` / `target.targetId` in the state file decide which session to route and which QQ chat to push to, and the tool name `send_qq_message` performs the send. If the upstream plugin changes either, the QQ channel stops working (the panel shows the error; web review is unaffected).
+- Therefore this plugin's `package.json` declares **no** dependency on it and ships none of its code. To use QQ, install and bind the bot separately (see the QQ channel section).
+- `@hualiong/dsh-qq-bot` itself depends on Tencent's `@tencent-connect/qqbot-*` and `qrcode`; those belong to it, not to this plugin.
+- Version note: this plugin is verified against `@hualiong/dsh-qq-bot` 0.4.2 (its state-file shape and `send_qq_message` tool). If QQ behaviour breaks after a bot update, check the QQ error line in the panel first.
 
 ## Security & privacy
 
@@ -460,13 +490,13 @@ The panel has a dropdown listing the user's existing DSH conversations (title on
 
 If the selected conversation is archived or deleted, the panel falls back to the first live conversation. Importing words from a different conversation stores the queue and waits for Start in the selected one (the import result says so).
 
-## QQ channel (dsh-qq-bot)
+## QQ channel (optional third-party bot)
 
-When the official QQ bot plugin (`@hualiong/dsh-qq-bot`) has bound a session and its owner has messaged the bot once, the same review can run in the QQ chat:
+QQ is **not implemented by this plugin**: it bridges the third-party `@hualiong/dsh-qq-bot` plugin (see “Dependencies & third-party components”). Once that bot is installed, bound to a session, and its owner has messaged it once, the same review can run in the QQ chat:
 
-- The panel shows a QQ row: **Review on QQ** switches the selected conversation to the QQ-bound session and sets `channel: "qq"` in `settings.json`; **Back to web chat** returns to the previous conversation. Picking any conversation in the dropdown overrides a forced channel; picking the QQ-bound one re-enters QQ mode automatically under the default `auto` channel.
+- The panel shows a QQ row: **Review on QQ** switches the selected conversation to the QQ-bound session and sets `channel: "qq"` in `settings.json`; **Back to web chat** returns to the previous conversation. Picking any conversation in the dropdown overrides a forced channel; picking the QQ-bound one re-enters QQ mode automatically under the default `auto` channel. Without the bot or a binding the row says “QQ bot plugin not detected” / “no bound session”.
 - **Delivery is plugin-driven.** The plugin pushes `Q: {word}` to QQ through the bot's `send_qq_message` tool (`tools.get('send_qq_message')`), so no model turn is needed to carry a question. A next question waits for the graded answer's turn to end plus a 1.5 s head start, so the bot's reply is never overtaken.
-- **Answers stay model-graded.** The user replies in QQ; the bot prompts the bound session with `[QQ] …`; the model sees the QQ protocol section (QUEUE head = pending word, reply exactly one `✅/❌ {word} = {meaning}` line); the bot relays that line; the plugin records it from the same session event stream it already watches and queues the next question.
+- **Answers stay model-graded.** The user replies in QQ; the bot prompts the bound session with `[QQ] …`; the model sees the QQ protocol section (QUEUE head = pending word, reply exactly one `✅/🤔/❌ {word} = {meaning}` line); the bot relays that line; the plugin records it from the same session event stream it already watches and queues the next question.
 - **Due reminders** are pushed to the same QQ chat, still capped by `reminderMaxPerDay` (default 1/day).
 - **Image upload is not part of the QQ bot's inbound path** (it accepts text only), so import the worksheet image from the Web chat or paste the word list in QQ. The ledger and schedule are shared either way.
 - If the bot is missing, unbound, or a send fails, the panel row reports it and the error is persisted as `qqError` in `ledger.json`. The state file location can be overridden with the `qqStatePath` plugin config.
