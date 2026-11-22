@@ -17,7 +17,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
@@ -113,6 +113,13 @@ function clampNum(value, min, max, fallback) {
   const n = Number(value)
   if (!Number.isFinite(n)) return fallback
   return Math.min(max, Math.max(min, n))
+}
+
+/** Per-word ease factor (SM-2 style): 0.7 = slower, 1.5 = faster. */
+function clampEase(value) {
+  const n = Number(value)
+  if (!Number.isFinite(n)) return 1
+  return Math.min(1.5, Math.max(0.7, Math.round(n * 100) / 100))
 }
 
 function resolveConfig(config) {
@@ -320,10 +327,12 @@ export function apply(ctx, config) {
   let state = loadLedger()
   let settings = loadSettings()
   let continueToken = 0
+  // Cheap runtime diagnostics for the panel: no extra files, no logging deps.
+  const diag = { lastSaveMs: 0, lastSaveAt: null, ledgerBytes: 0 }
 
   // ── Persistence ──────────────────────────────────────────────────────────
   function freshCounters() {
-    return { date: todayKey(), new: 0, review: 0, total: 0, minutes: 0 }
+    return { date: todayKey(), new: 0, review: 0, total: 0, minutes: 0, errors: 0, fuzzy: 0 }
   }
 
   function freshState() {
@@ -340,6 +349,8 @@ export function apply(ctx, config) {
       pendingCounted: false,
       lastTickAt: null,
       dailyCounters: freshCounters(),
+      history: [],
+      lastImport: null,
       quota: null,
       reminderVersion: 0,
       reminderAt: null,
@@ -362,6 +373,7 @@ export function apply(ctx, config) {
         : [],
       freq: value.freq === 'high' || value.freq === 'low' || value.freq === 'normal' ? value.freq : 'normal',
       stage: Math.min(stage, cfg.ladderMinutes.length - 1),
+      ease: clampEase(value.ease),
       dueAt: Number.isFinite(value.dueAt) ? value.dueAt : Date.now(),
       createdAt: Number.isFinite(value.createdAt) ? value.createdAt : Date.now(),
       lastAskedAt: Number.isFinite(value.lastAskedAt) ? value.lastAskedAt : null,
@@ -416,6 +428,8 @@ export function apply(ctx, config) {
             review: Number.isFinite(parsed.dailyCounters.review) ? parsed.dailyCounters.review : 0,
             total: Number.isFinite(parsed.dailyCounters.total) ? parsed.dailyCounters.total : 0,
             minutes: Number.isFinite(parsed.dailyCounters.minutes) ? parsed.dailyCounters.minutes : 0,
+            errors: Number.isFinite(parsed.dailyCounters.errors) ? parsed.dailyCounters.errors : 0,
+            fuzzy: Number.isFinite(parsed.dailyCounters.fuzzy) ? parsed.dailyCounters.fuzzy : 0,
           }
         }
         if (parsed.quota && typeof parsed.quota === 'object' && typeof parsed.quota.message === 'string') next.quota = parsed.quota
@@ -438,6 +452,28 @@ export function apply(ctx, config) {
             at: Number.isFinite(parsed.lastConflict.at) ? parsed.lastConflict.at : Date.now(),
             answer: typeof parsed.lastConflict.answer === 'string' ? parsed.lastConflict.answer : '',
             expected: typeof parsed.lastConflict.expected === 'string' ? parsed.lastConflict.expected : '',
+          }
+        }
+        if (Array.isArray(parsed.history)) {
+          next.history = parsed.history
+            .filter((row) => row && typeof row === 'object' && typeof row.date === 'string')
+            .slice(-30)
+            .map((row) => ({
+              date: row.date,
+              asked: Number.isFinite(row.asked) ? row.asked : 0,
+              errors: Number.isFinite(row.errors) ? row.errors : 0,
+              fuzzy: Number.isFinite(row.fuzzy) ? row.fuzzy : 0,
+            }))
+        }
+        if (parsed.lastImport && typeof parsed.lastImport === 'object' && typeof parsed.lastImport.mode === 'string') {
+          next.lastImport = {
+            mode: parsed.lastImport.mode,
+            at: Number.isFinite(parsed.lastImport.at) ? parsed.lastImport.at : Date.now(),
+            parsed: Number.isFinite(parsed.lastImport.parsed) ? parsed.lastImport.parsed : 0,
+            added: Number.isFinite(parsed.lastImport.added) ? parsed.lastImport.added : 0,
+            skippedBasic: Number.isFinite(parsed.lastImport.skippedBasic) ? parsed.lastImport.skippedBasic : 0,
+            notExam: Number.isFinite(parsed.lastImport.notExam) ? parsed.lastImport.notExam : 0,
+            overLimit: Number.isFinite(parsed.lastImport.overLimit) ? parsed.lastImport.overLimit : 0,
           }
         }
       } else {
@@ -465,8 +501,18 @@ export function apply(ctx, config) {
       mkdirSync(cfg.dataDir, { recursive: true })
       state.updatedAt = Date.now()
       const tmp = `${ledgerPath}.${process.pid}.tmp`
-      writeFileSync(tmp, `${JSON.stringify(state, null, 2)}\n`, 'utf8')
+      const payload = `${JSON.stringify(state, null, 2)}\n`
+      // Atomic by design: write a temp file, then rename over the real one, so
+      // an interrupted write can never truncate the ledger.
+      const started = performance.now()
+      writeFileSync(tmp, payload, 'utf8')
       renameSync(tmp, ledgerPath)
+      diag.lastSaveMs = Math.round((performance.now() - started) * 100) / 100
+      diag.lastSaveAt = Date.now()
+      diag.ledgerBytes = Buffer.byteLength(payload)
+      if (diag.lastSaveMs > 40) {
+        ctx.logger?.warn?.(`${PLUGIN}: slow ledger save ${diag.lastSaveMs}ms for ${diag.ledgerBytes} bytes`)
+      }
     } catch (error) {
       ctx.logger?.warn?.(`${PLUGIN}: could not write ${ledgerPath}: ${String(error)}`)
     }
@@ -736,6 +782,23 @@ export function apply(ctx, config) {
   function ensureDay() {
     const today = todayKey()
     if (state.dailyCounters.date === today) return false
+    const previous = state.dailyCounters
+    // Keep a small per-day history so the panel can show a 7-day trend without
+    // another data file.
+    if (previous && (previous.total > 0 || previous.errors > 0 || previous.fuzzy > 0)) {
+      state.history = [
+        ...(Array.isArray(state.history) ? state.history : []),
+        {
+          date: previous.date,
+          asked: previous.total,
+          errors: previous.errors || 0,
+          fuzzy: previous.fuzzy || 0,
+        },
+      ].slice(-30)
+      ctx.logger?.info?.(
+        `${PLUGIN}: [day] rolled over from ${previous.date} asked=${previous.total} wrong=${previous.errors || 0} fuzzy=${previous.fuzzy || 0}`,
+      )
+    }
     state.dailyCounters = freshCounters()
     state.quota = null
     state.lastTickAt = Date.now()
@@ -863,17 +926,18 @@ export function apply(ctx, config) {
 
   function intervalOf(word) {
     const stage = Math.min(word.stage, cfg.ladderMinutes.length - 1)
-    const minutes = cfg.ladderMinutes[stage] * frequencyMultiplier(word.freq, cfg)
+    const minutes = cfg.ladderMinutes[stage] * frequencyMultiplier(word.freq, cfg) * clampEase(word.ease)
     return Math.max(60_000, Math.round(minutes * 60_000))
   }
 
-  // "Fuzzy" is a half step: the word stays where it is on the ladder but comes
-  // back at half the current interval (never sooner than the wrong-answer
-  // retry delay, never later than the interval itself).
-  function fuzzyIntervalOf(word) {
-    const half = Math.round(intervalOf(word) / 2)
+  // "Fuzzy" is a partial step. A hedged but on-target answer keeps half the
+  // interval; an answer that only half-matched the gloss is weaker, so it
+  // comes back sooner — a small gradient inside the same grade.
+  function fuzzyIntervalOf(word, factor = 0.5) {
+    const base = intervalOf(word)
+    const scaled = Math.round(base * factor)
     const floor = Math.round(cfg.retryDelayMinutes * 60_000)
-    return Math.min(Math.max(floor, half), intervalOf(word))
+    return Math.min(Math.max(floor, scaled), base)
   }
 
   // `dueOnly` is the continuous mode: it only ever takes words that are due
@@ -1080,52 +1144,75 @@ export function apply(ctx, config) {
     return text
   }
 
-  // A stored meaning is a short gloss, possibly listing alternatives. Compare
-  // loosely: punctuation/case dropped, any gloss accepted, partial answer ok.
-  function answerMatchesStored(answerText, word) {
+  // A stored meaning is a short gloss, possibly listing alternatives. Matching
+  // reports a quality instead of a boolean:
+  // - "full"    — the gloss (or one of its glosses/tokens) is essentially what
+  //               the user said;
+  // - "partial" — the answer overlaps a stored gloss but is not one of its
+  //               wordings ("真的" for "真正的"): half-known, not wrong;
+  // - "none"    — a different meaning; the model's ✅ is vetoed.
+  function answerQuality(answerText, word) {
     const bank = [word.meaning, ...(Array.isArray(word.meanings) ? word.meanings : [])].filter(Boolean)
-    if (bank.length === 0) return true // no reference yet: the first answer defines it
+    if (bank.length === 0) return 'full' // no reference yet: the first answer defines it
     const answer = squashText(answerText)
-    if (answer.length < 2) return true // too short to judge ("嗯", "嗯…")
+    if (answer.length < 2) return 'full' // too short to judge ("嗯", "嗯…")
+    let partial = false
     for (const meaning of bank) {
       const target = squashText(meaning)
       if (!target) continue
-      if (target === answer || target.includes(answer) || answer.includes(target)) return true
+      if (target === answer || target.includes(answer) || answer.includes(target)) return 'full'
       for (const token of meaningTokens(meaning)) {
-        if (answer.includes(token) || token.includes(answer)) return true
+        if (token === answer || answer.includes(token) || token.includes(answer)) return 'full'
       }
-      if (shortAnswerSubset(answer, target)) return true
+      if (shortAnswerSubset(answer, target)) partial = true
     }
-    return false
+    return partial ? 'partial' : 'none'
   }
 
   // Three outcomes: correct / fuzzy (recognised, not solid) / wrong. The model
   // proposes one; the plugin may only downgrade it, never upgrade an explicit
-  // ❌ into a ✅.
+  // ❌ into a ✅. `fuzzyFactor` puts a gradient inside the fuzzy grade.
   function gradeAnswer(key, modelVerdict, meaning, sessionId) {
     const word = state.words[key]
     if (!word) return false
     const answerText = takeUserAnswer(sessionId) || ''
     let verdict = modelVerdict
+    let fuzzyFactor = 0.5
+    let extraMeaning = ''
     if (verdict === 'correct' && answerText) {
       if (NOT_ANSWERED.test(answerText.trim())) {
         verdict = 'wrong'
-      } else if (cfg.verifyAnswers && !answerMatchesStored(answerText, word)) {
-        verdict = 'wrong'
-        state.lastConflict = {
-          word: key,
-          at: Date.now(),
-          answer: answerText.slice(0, 80),
-          expected: [word.meaning, ...(word.meanings || [])].filter(Boolean).join(' / ').slice(0, 80),
+      } else {
+        const quality = cfg.verifyAnswers ? answerQuality(answerText, word) : 'full'
+        if (quality === 'none') {
+          verdict = 'wrong'
+          state.lastConflict = {
+            word: key,
+            at: Date.now(),
+            answer: answerText.slice(0, 80),
+            expected: [word.meaning, ...(word.meanings || [])].filter(Boolean).join(' / ').slice(0, 80),
+          }
+        } else if (quality === 'partial') {
+          // Only part of the gloss: half-known, and remember the user's own
+          // wording so the same phrasing is not punished twice.
+          verdict = 'fuzzy'
+          fuzzyFactor = 0.35
+          extraMeaning = answerText.slice(0, 60)
+        } else if (UNCERTAIN_ANSWER.test(answerText)) {
+          verdict = 'fuzzy'
         }
-      } else if (UNCERTAIN_ANSWER.test(answerText)) {
-        verdict = 'fuzzy'
       }
     }
-    return recordAnswer(key, verdict, meaning, sessionId)
+    const recorded = recordAnswer(key, verdict, meaning, sessionId, { fuzzyFactor, extraMeaning })
+    if (recorded) {
+      ctx.logger?.info?.(
+        `${PLUGIN}: [grade] word=${key} verdict=${verdict}${verdict === 'fuzzy' ? ` factor=${fuzzyFactor}` : ''}${extraMeaning ? ' partial=1' : ''}`,
+      )
+    }
+    return recorded
   }
 
-  function recordAnswer(key, verdict, meaning, sessionId) {
+  function recordAnswer(key, verdict, meaning, sessionId, options = {}) {
     const word = state.words[key]
     if (!word) return false
     const now = Date.now()
@@ -1139,22 +1226,34 @@ export function apply(ctx, config) {
       }
       word.meaning = cleanMeaning
     }
+    // A partially matching answer joins the accepted-gloss pool, so the user's
+    // phrasing is learnt instead of being rejected on every review.
+    const extra = typeof options.extraMeaning === 'string' ? options.extraMeaning.trim() : ''
+    if (extra && extra !== word.meaning) {
+      const bank = [word.meaning, ...(Array.isArray(word.meanings) ? word.meanings : [])].filter(Boolean)
+      if (!bank.includes(extra)) word.meanings = [...(word.meanings || []), extra].slice(-4)
+    }
     word.lastResultAt = now
     if (verdict === 'fuzzy') {
-      // Same stage, half the interval: it returns soon without being thrown
-      // back to step one like a real mistake.
+      // Same stage, shorter interval: it returns soon without being thrown back
+      // to step one like a real mistake. Ease nudges down slightly.
       word.fuzzy += 1
       word.lastFuzzyAt = now
-      word.dueAt = now + fuzzyIntervalOf(word)
+      word.ease = clampEase(clampEase(word.ease) - 0.05)
+      word.dueAt = now + fuzzyIntervalOf(word, options.fuzzyFactor === 0.35 ? 0.35 : 0.5)
+      state.dailyCounters.fuzzy = (state.dailyCounters.fuzzy || 0) + 1
     } else if (verdict === 'correct') {
       word.correct += 1
       word.stage = Math.min(word.stage + 1, cfg.ladderMinutes.length - 1)
+      word.ease = clampEase(clampEase(word.ease) + 0.05)
       word.dueAt = now + intervalOf(word)
     } else {
       word.errors += 1
       word.lastErrorAt = now
       word.stage = 0
+      word.ease = clampEase(clampEase(word.ease) - 0.15)
       word.dueAt = now + Math.round(cfg.retryDelayMinutes * 60_000)
+      state.dailyCounters.errors = (state.dailyCounters.errors || 0) + 1
     }
     const queued = state.queue.indexOf(key)
     if (queued >= 0) state.queue.splice(queued, 1)
@@ -1222,6 +1321,7 @@ export function apply(ctx, config) {
         meanings: [],
         freq: classifyFrequency(item.word, item.freq),
         stage: 0,
+        ease: 1,
         dueAt: now,
         createdAt: now,
         lastAskedAt: null,
@@ -1244,6 +1344,20 @@ export function apply(ctx, config) {
       parsed: candidates.length,
       examLevel,
     }
+    // Remember what the last import looked like so the panel can warn when an
+    // image probably lost words ("可能是识别不完整").
+    state.lastImport = {
+      mode: article ? 'article' : 'list',
+      at: now,
+      parsed: candidates.length,
+      added: accepted.length,
+      skippedBasic: skippedBasic.length,
+      notExam: notExam.length,
+      overLimit: overLimit.length,
+    }
+    ctx.logger?.info?.(
+      `${PLUGIN}: [import] mode=${article ? 'article' : 'list'} parsed=${candidates.length} added=${accepted.length} basic=${skippedBasic.length} out=${notExam.length} capped=${overLimit.length}`,
+    )
     if (typeof sessionId === 'string' && sessionId) state.activeSessionId = sessionId
     // Route the review to the selected conversation. When the words were
     // imported from a different session, the queue waits for Start there.
@@ -1910,7 +2024,19 @@ export function apply(ctx, config) {
       verifyAnswers: cfg.verifyAnswers,
       lastConflict: state.lastConflict || null,
       counters: { ...state.dailyCounters },
+      history: Array.isArray(state.history) ? state.history.slice(-14) : [],
+      lastImport: state.lastImport || null,
       quota: state.quota,
+      diag: {
+        lastSaveMs: diag.lastSaveMs,
+        lastSaveAt: diag.lastSaveAt,
+        ledgerBytes: diag.ledgerBytes,
+        words: all.length,
+        queueLength: state.queue.length,
+        verifyAnswers: cfg.verifyAnswers,
+        examLevel: cfg.examLevel,
+        articleMaxWords: cfg.articleMaxWords,
+      },
       settings: {
         dailyNewLimit: settings.dailyNewLimit,
         dailyReviewLimit: settings.dailyReviewLimit,
@@ -2022,18 +2148,22 @@ export function apply(ctx, config) {
     return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
   }
 
-  function exportCsv(scope) {
-    const rows = [['word', 'meaning', 'errors', 'fuzzy', 'stage', 'correct', 'due_at', 'last_result_at']]
-    const list = entries()
+  function exportRows(scope) {
+    return entries()
       .filter((word) => (scope === 'all' ? true : word.errors > 0 || word.fuzzy > 0))
       .sort((a, b) => (b.errors - a.errors) || (b.fuzzy - a.fuzzy) || a.word.localeCompare(b.word))
-    for (const word of list) {
+  }
+
+  function exportCsv(scope) {
+    const rows = [['word', 'meaning', 'errors', 'fuzzy', 'stage', 'ease', 'correct', 'due_at', 'last_result_at']]
+    for (const word of exportRows(scope)) {
       rows.push([
         word.word,
         word.meaning,
         word.errors,
         word.fuzzy,
         word.stage,
+        word.ease,
         word.correct,
         stampText(word.dueAt),
         stampText(word.lastResultAt),
@@ -2041,6 +2171,32 @@ export function apply(ctx, config) {
     }
     // BOM so Excel opens the Chinese meanings as UTF-8 instead of mojibake.
     return `\uFEFF${rows.map((row) => row.map(csvCell).join(',')).join('\r\n')}\r\n`
+  }
+
+  function exportJson(scope) {
+    const rows = exportRows(scope).map((word) => ({
+      word: word.word,
+      meaning: word.meaning,
+      meanings: Array.isArray(word.meanings) ? word.meanings : [],
+      errors: word.errors,
+      fuzzy: word.fuzzy,
+      correct: word.correct,
+      stage: word.stage,
+      ease: word.ease,
+      freq: word.freq,
+      source: word.source,
+      dueAt: Number.isFinite(word.dueAt) ? new Date(word.dueAt).toISOString() : null,
+      lastResultAt: Number.isFinite(word.lastResultAt) ? new Date(word.lastResultAt).toISOString() : null,
+      createdAt: Number.isFinite(word.createdAt) ? new Date(word.createdAt).toISOString() : null,
+    }))
+    return `${JSON.stringify(rows, null, 2)}\n`
+  }
+
+  // Anki "notes in plain text": front \t back \t tags. Import with a tab
+  // separator; the tag groups everything the plugin exported.
+  function exportAnki(scope) {
+    const lines = exportRows(scope).map((word) => `${word.word}\t${word.meaning || word.word}\tdsh-vocab`)
+    return `${lines.join('\n')}\n`
   }
 
   async function readJsonBody(req) {
@@ -2273,11 +2429,20 @@ export function apply(ctx, config) {
             writeJson(res, 200, { ok: true, value: { ...(await stateWithSessions()), wordAction: result } })
             return
           }
-          if (req.method === 'GET' && action === 'export.csv') {
+          if (req.method === 'GET' && (action === 'export.csv' || action === 'export.json' || action === 'export.anki')) {
             const scope = url.searchParams.get('scope') === 'all' ? 'all' : 'weak'
-            writeText(res, 200, 'text/csv; charset=utf-8', exportCsv(scope), {
-              'content-disposition': `attachment; filename="vocab-${scope}.csv"`,
-            })
+            const format = action.slice('export.'.length)
+            if (format === 'json') {
+              writeText(res, 200, 'application/json; charset=utf-8', exportJson(scope))
+            } else if (format === 'anki') {
+              writeText(res, 200, 'text/tab-separated-values; charset=utf-8', exportAnki(scope), {
+                'content-disposition': `attachment; filename="vocab-${scope}.txt"`,
+              })
+            } else {
+              writeText(res, 200, 'text/csv; charset=utf-8', exportCsv(scope), {
+                'content-disposition': `attachment; filename="vocab-${scope}.csv"`,
+              })
+            }
             return
           }
           writeJson(res, 404, { ok: false, error: { code: 'not-found', message: `unknown action ${action || '(empty)'}` } })

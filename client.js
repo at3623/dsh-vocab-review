@@ -85,6 +85,21 @@ window.__ModuleLoader__.load({
       exportCsv: 'Export CSV',
       verifyNote: 'Every ✅ is re-checked against the stored meaning; a different meaning counts as wrong.',
       conflictLine: 'Plugin veto',
+      exportJson: 'JSON',
+      exportAnki: 'Anki',
+      historyTitle: 'Last 7 days',
+      historyHint: 'asked/wrong',
+      diagTitle: 'Diagnostics',
+      diagLedger: 'Ledger',
+      diagSave: 'Last save',
+      diagQueue: 'Queue',
+      diagExam: 'Article exam scope',
+      diagVerify: 'Plugin verify',
+      lastImportLabel: 'Last import',
+      importIncomplete: 'This import looks short — the image may have lost words; a typed word list is safer.',
+      skippedBasicLabel: 'basic',
+      skippedOutLabel: 'out of scope',
+      wordsUnit: 'words',
     }
     const ZH = {
       title: '单词复习',
@@ -150,6 +165,21 @@ window.__ModuleLoader__.load({
       exportCsv: '导出 CSV',
       verifyNote: '每个 ✅ 都会用已存词义二次校验，词义不符按错处理。',
       conflictLine: '插件改判',
+      exportJson: 'JSON',
+      exportAnki: 'Anki',
+      historyTitle: '近 7 天',
+      historyHint: '题/错',
+      diagTitle: '诊断',
+      diagLedger: '词库',
+      diagSave: '上次保存',
+      diagQueue: '队列',
+      diagExam: '文章考试范围',
+      diagVerify: '插件复核',
+      lastImportLabel: '上次导入',
+      importIncomplete: '本次导入偏少，图片可能漏词，改用文字词表更稳。',
+      skippedBasicLabel: '基础词',
+      skippedOutLabel: '超纲',
+      wordsUnit: '词',
     }
 
     let clientCtx = null
@@ -357,6 +387,9 @@ window.__ModuleLoader__.load({
 .vr-mini:hover:not(:disabled) { color: var(--dsw-alias-label-primary); background: var(--dsw-alias-bg-layer-2); }
 .vr-mini:disabled { opacity: 0.5; cursor: default; }
 .vr-conflict { font-size: 12px; color: var(--dsw-alias-label-secondary); overflow-wrap: anywhere; }
+.vr-history { display: flex; align-items: baseline; gap: 10px; }
+.vr-history-vals { font-size: 12px; color: var(--dsw-alias-label-secondary); font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.vr-diag { display: flex; flex-direction: column; gap: 4px; margin-top: 10px; font-size: 12px; color: var(--dsw-alias-label-secondary); font-variant-numeric: tabular-nums; }
 .vr-hint { font-size: 12px; color: var(--dsw-alias-label-secondary); }
 .vr-settings { border-top: 1px solid var(--dsw-alias-border-l1); padding-top: 14px; }
 .vr-settings summary { cursor: pointer; font-size: 12px; font-weight: 600; color: var(--dsw-alias-label-secondary); text-transform: uppercase; letter-spacing: 0.05em; }
@@ -543,12 +576,13 @@ window.__ModuleLoader__.load({
           .finally(() => setWordBusy(''))
       }
 
-      const exportWords = () => {
+      const exportWords = (format) => {
         try {
-          const url = new URL(`${API}/export.csv?scope=weak`, document.baseURI).href
+          const name = format === 'csv' ? 'vocab-weak.csv' : format === 'json' ? 'vocab-weak.json' : 'vocab-weak.txt'
+          const url = new URL(`${API}/export.${format}?scope=weak`, document.baseURI).href
           const link = document.createElement('a')
           link.href = url
-          link.download = 'vocab-weak.csv'
+          link.download = name
           document.body.appendChild(link)
           link.click()
           link.remove()
@@ -568,6 +602,9 @@ window.__ModuleLoader__.load({
       const queue = snapshot && Array.isArray(snapshot.queue) ? snapshot.queue : []
       const weak = snapshot && Array.isArray(snapshot.weakWords) ? snapshot.weakWords : []
       const lastConflict = snapshot ? snapshot.lastConflict : null
+      const history = snapshot && Array.isArray(snapshot.history) ? snapshot.history : []
+      const lastImport = snapshot ? snapshot.lastImport : null
+      const diag = snapshot ? snapshot.diag : null
       const counters = snapshot && snapshot.counters ? snapshot.counters : { new: 0, review: 0, total: 0, minutes: 0 }
       const quota = snapshot ? snapshot.quota : null
       const idleReason = snapshot ? snapshot.idleReason : null
@@ -711,9 +748,23 @@ window.__ModuleLoader__.load({
                   { className: 'vr-weak-tools' },
                   h('div', { className: 'vr-section-title' }, `${t('weakWords')} · ${weak.length}`),
                   h(
-                    'button',
-                    { className: 'vr-mini', type: 'button', onClick: exportWords, disabled: weak.length === 0 },
-                    t('exportCsv'),
+                    'span',
+                    { className: 'vr-weak-actions' },
+                    h(
+                      'button',
+                      { className: 'vr-mini', type: 'button', onClick: () => exportWords('csv'), disabled: weak.length === 0 },
+                      t('exportCsv'),
+                    ),
+                    h(
+                      'button',
+                      { className: 'vr-mini', type: 'button', onClick: () => exportWords('json'), disabled: weak.length === 0 },
+                      t('exportJson'),
+                    ),
+                    h(
+                      'button',
+                      { className: 'vr-mini', type: 'button', onClick: () => exportWords('anki'), disabled: weak.length === 0 },
+                      t('exportAnki'),
+                    ),
                   ),
                 ),
                 h('div', { className: 'vr-idle' }, t('weakHint')),
@@ -764,6 +815,36 @@ window.__ModuleLoader__.load({
                     )
                   : null,
                 h('div', { className: 'vr-hint' }, t('verifyNote')),
+                history.length > 0 || counters.total > 0
+                  ? h(
+                      'div',
+                      { className: 'vr-history' },
+                      h('span', { className: 'vr-section-title' }, t('historyTitle')),
+                      h(
+                        'span',
+                        { className: 'vr-history-vals', title: t('historyHint') },
+                        [
+                          ...history.slice(-6),
+                          { date: 'today', asked: counters.total, errors: counters.errors || 0 },
+                        ]
+                          .map(
+                            (row) =>
+                              `${row.date === 'today' ? t('today') : row.date.slice(5)} ${row.asked}/${row.errors || 0}`,
+                          )
+                          .join(' · '),
+                      ),
+                    )
+                  : null,
+                lastImport
+                  ? h(
+                      'div',
+                      { className: lastImport.parsed < 3 ? 'vr-error' : 'vr-hint' },
+                      `${t('lastImportLabel')}: ${lastImport.mode === 'article' ? 'article' : 'list'} · ${lastImport.parsed} → ${lastImport.added}` +
+                        `${lastImport.skippedBasic ? ` · −${lastImport.skippedBasic} ${t('skippedBasicLabel')}` : ''}` +
+                        `${lastImport.notExam ? ` · −${lastImport.notExam} ${t('skippedOutLabel')}` : ''}` +
+                        `${lastImport.parsed < 3 ? ` · ${t('importIncomplete')}` : ''}`,
+                    )
+                  : null,
               ),
           h(
             'details',
@@ -802,6 +883,25 @@ window.__ModuleLoader__.load({
               h('button', { className: 'vr-save', type: 'button', onClick: saveSettings, disabled: saving }, saving ? t('saving') : saved ? t('saved') : t('save')),
             ),
           ),
+          diag
+            ? h(
+                'details',
+                { className: 'vr-settings' },
+                h('summary', null, t('diagTitle')),
+                h(
+                  'div',
+                  { className: 'vr-diag' },
+                  h('div', null, `${t('diagLedger')}: ${diag.words} ${t('wordsUnit')} · ${Math.round((diag.ledgerBytes || 0) / 1024)} KB`),
+                  h('div', null, `${t('diagSave')}: ${diag.lastSaveMs} ms${diag.lastSaveAt ? ` · ${clockText(diag.lastSaveAt)}` : ''}`),
+                  h('div', null, `${t('diagQueue')}: ${diag.queueLength} · ${t('dueToday')} ${due}`),
+                  h(
+                    'div',
+                    null,
+                    `${t('diagExam')}: ${String(diag.examLevel || '').toUpperCase()} · ${t('diagVerify')}: ${diag.verifyAnswers ? 'on' : 'off'}`,
+                  ),
+                ),
+              )
+            : null,
           h('div', { className: 'vr-hint' }, t('hint')),
         ),
       )

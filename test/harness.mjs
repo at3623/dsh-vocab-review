@@ -682,7 +682,7 @@ assert.equal((await state(bookEnv)).weakWords.some((row) => row.word === 'cautio
 const csvResponse = await callRoute(bookEnv, 'GET', '/api/dsh-vocab-review/export.csv?scope=all')
 assert.equal(csvResponse.status, 200)
 assert.equal(csvResponse.headers['content-type'], 'text/csv; charset=utf-8')
-assert.ok(String(csvResponse.body).startsWith('\uFEFFword,meaning,errors,fuzzy,stage,correct,due_at,last_result_at'))
+assert.ok(String(csvResponse.body).startsWith('\uFEFFword,meaning,errors,fuzzy,stage,ease,correct,due_at,last_result_at'))
 assert.ok(String(csvResponse.body).includes('benefit'))
 assert.ok(String(csvResponse.body).includes('好处'))
 assert.ok(!String(csvResponse.body).includes('cautious'))
@@ -733,10 +733,12 @@ fireUser(partEnv2, '真的')
 fire(partEnv2, answerText('✅ genuine = 真正的；真诚的'))
 await settle()
 const partAfter = loadLedger(partDir)
-assert.equal(partAfter.words.genuine.correct, 2, 'a different wording of the same gloss is still correct')
-assert.equal(partAfter.words.genuine.errors, 0)
+assert.equal(partAfter.words.genuine.correct, 1, 'the first answer was correct')
+assert.equal(partAfter.words.genuine.errors, 0, 'a partial rewording is never vetoed')
+assert.equal(partAfter.words.genuine.fuzzy, 1, 'a partial rewording is graded half-known')
+assert.ok(partAfter.words.genuine.meanings.includes('真的'), 'the user wording joins the accepted-gloss pool')
 assert.equal(partAfter.lastConflict, null)
-console.log('PASS partial: a short Chinese rewording of the stored gloss is not vetoed')
+console.log('PASS partial: a short Chinese rewording is half-known (not wrong) and joins the gloss pool')
 
 // ── 22. Article image: basic words filtered, batch capped, loop not started ─
 const artDir = join(root, 'article')
@@ -823,6 +825,108 @@ const examGk = await examDefault.tools.get('vocab_import_article').execute(
 assert.equal(examGk.examLevel, 'gaokao', 'the plugin examLevel is the fallback')
 assert.ok(examGk.message.includes('高考'))
 console.log('PASS exam scope: per-call exam level, :out words refused, configured examLevel as the default')
+
+// ── 25. Ease factor: answers bend the interval (SM-2 style) ──────────────
+const easeDir = join(root, 'ease')
+const easeEnv = freshEnv(easeDir)
+await easeEnv.tools.get('vocab_import').execute({ words: 'abandon' }, { agent: easeEnv.agent })
+fireUser(easeEnv, '不知道')
+fire(easeEnv, answerText('❌ abandon = 放弃'))
+await settle()
+let easeLedger = loadLedger(easeDir)
+assert.equal(easeLedger.words.abandon.ease, 0.85, 'a wrong answer lowers ease by 0.15')
+easeLedger.words.abandon.dueAt = Date.now() - 1_000
+easeLedger.words.abandon.lastResultAt = Date.now() - 5_000
+writeFileSync(join(easeDir, 'ledger.json'), JSON.stringify(easeLedger))
+const easeEnv2 = freshEnv(easeDir)
+assert.equal((await post(easeEnv2, 'start')).ok, true)
+fireUser(easeEnv2, '放弃')
+fire(easeEnv2, answerText('✅ abandon = 放弃'))
+await settle()
+easeLedger = loadLedger(easeDir)
+assert.equal(easeLedger.words.abandon.ease, 0.9, 'a correct answer raises ease by 0.05')
+const easeDueIn = easeLedger.words.abandon.dueAt - Date.now()
+assert.ok(easeDueIn > 155 * 60_000 && easeDueIn < 170 * 60_000, `3h tallered by ease 0.9, got ${Math.round(easeDueIn / 60_000)}m`)
+console.log('PASS ease: wrong answers shrink intervals, correct answers stretch them, clamped 0.7-1.5')
+
+// ── 26. Export formats: CSV, JSON, Anki TSV ──────────────────────────────
+const exportDir = join(root, 'export')
+const exportEnv = freshEnv(exportDir)
+await exportEnv.tools.get('vocab_import').execute({ words: 'abandon, cautious' }, { agent: exportEnv.agent })
+fireUser(exportEnv, '不知道')
+fire(exportEnv, answerText('❌ abandon = 放弃'))
+await settle()
+const jsonExport = await callRoute(exportEnv, 'GET', '/api/dsh-vocab-review/export.json?scope=all')
+assert.equal(jsonExport.status, 200)
+assert.match(String(jsonExport.headers['content-type']), /application\/json/u)
+const jsonRows = Array.isArray(jsonExport.body) ? jsonExport.body : JSON.parse(String(jsonExport.body))
+assert.equal(jsonRows.length, 2)
+const abandonJson = jsonRows.find((row) => row.word === 'abandon')
+assert.equal(abandonJson.errors, 1)
+assert.equal(typeof abandonJson.ease, 'number')
+assert.match(abandonJson.dueAt, /^\d{4}-\d{2}-\d{2}T/u, 'dueAt is ISO in JSON export')
+const ankiExport = await callRoute(exportEnv, 'GET', '/api/dsh-vocab-review/export.anki?scope=weak')
+assert.equal(ankiExport.status, 200)
+assert.match(String(ankiExport.headers['content-type']), /tab-separated-values/u)
+assert.match(String(ankiExport.body), /^abandon\t放弃\tdsh-vocab$/mu)
+console.log('PASS export: CSV + JSON (ISO dates) + Anki TSV with the dsh-vocab tag')
+
+// ── 27. Daily history: the previous day is kept for the trend line ───────
+const historyDir = join(root, 'history')
+const historySeed = freshEnv(historyDir)
+await historySeed.tools.get('vocab_import').execute({ words: 'later' }, { agent: historySeed.agent })
+const historyLedger = loadLedger(historyDir)
+historyLedger.dailyCounters = { date: '2000-01-01', new: 2, review: 3, total: 5, minutes: 9, errors: 2, fuzzy: 1 }
+writeFileSync(join(historyDir, 'ledger.json'), JSON.stringify(historyLedger))
+const historyEnv = freshEnv(historyDir)
+const historyState = await state(historyEnv)
+assert.equal(historyState.counters.total, 0, 'counters restart on a new day')
+assert.equal(historyState.history.length, 1)
+assert.deepEqual(historyState.history[0], { date: '2000-01-01', asked: 5, errors: 2, fuzzy: 1 })
+console.log('PASS history: a completed day is appended to the 30-day history before counters reset')
+
+// ── 28. Diagnostics + last import are exposed to the panel ───────────────
+const diagState = await state(exportEnv)
+assert.equal(typeof diagState.diag.lastSaveMs, 'number')
+assert.ok(diagState.diag.ledgerBytes > 0, 'ledger size is measured')
+assert.equal(diagState.diag.verifyAnswers, true)
+assert.equal(diagState.diag.examLevel, 'cet4')
+assert.equal(diagState.lastImport.mode, 'list')
+assert.equal(diagState.lastImport.parsed, 2)
+assert.equal(diagState.lastImport.added, 2)
+const diagArticle = await state(artEnv)
+assert.equal(diagArticle.lastImport.mode, 'article')
+assert.equal(diagArticle.lastImport.skippedBasic, 3)
+console.log('PASS diagnostics: save latency/size, verify config and last import are in the state payload')
+
+// ── 29. Performance: a 1500-word ledger loads and saves quickly ──────────
+const perfDir = join(root, 'perf')
+mkdirSync(perfDir, { recursive: true })
+const perfWords = {}
+const perfNow = Date.now()
+for (let index = 0; index < 1500; index++) {
+  const word = `word${String(index).padStart(4, '0')}`
+  perfWords[word] = {
+    word, display: word, meaning: '测试', meanings: [], freq: 'normal', stage: index % 6, ease: 1,
+    dueAt: perfNow + index * 1000, createdAt: perfNow, lastAskedAt: null,
+    lastResultAt: null, lastErrorAt: null, lastFuzzyAt: null, correct: 0, errors: 0, fuzzy: 0,
+  }
+}
+writeFileSync(
+  join(perfDir, 'ledger.json'),
+  JSON.stringify({ version: 2, plugin: 'dsh-vocab-review', updatedAt: perfNow, loop: 'stopped', words: perfWords }),
+)
+const perfStart = performance.now()
+const perfEnv = freshEnv(perfDir)
+const perfLoadMs = performance.now() - perfStart
+const perfState = await state(perfEnv)
+assert.equal(perfState.total, 1500)
+assert.ok(perfLoadMs < 2_000, `1500-word ledger loads in ${Math.round(perfLoadMs)}ms (< 2000ms)`)
+assert.ok((await post(perfEnv, 'words/forget', { word: 'word0001' })).ok)
+const perfSaveMs = (await state(perfEnv)).diag.lastSaveMs
+assert.ok(perfSaveMs < 300, `1500-word save takes ${perfSaveMs}ms (< 300ms)`)
+assert.ok((await state(perfEnv)).diag.ledgerBytes > 100_000)
+console.log(`PASS performance: 1500 words load=${Math.round(perfLoadMs)}ms save=${perfSaveMs}ms`)
 
 rmSync(root, { recursive: true, force: true })
 console.log('\nALL CHECKS PASSED')
