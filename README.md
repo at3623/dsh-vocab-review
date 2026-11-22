@@ -67,7 +67,10 @@ DeepSeek Harness（DSH）插件 · 零运行时依赖 · 数据只在本机 · �
 ### 一分钟上手
 
 ```powershell
-# 从 GitHub 安装（需要 DSH 0.2.x、Node 22+）
+# 从 npm 安装（推荐：预构建包，跳过 allowBuilds 构建授权；需要 DSH 0.2.x、Node 22+）
+dsh plugin --profile <profile> add dsh-vocab-review
+
+# 或者从 GitHub 安装
 dsh plugin --profile <profile> add github:at3623/dsh-vocab-review
 ```
 
@@ -333,6 +336,12 @@ Underlined-word vocabulary review for DeepSeek Harness. This README is bilingual
 ## Install
 
 Requires DeepSeek Harness 0.2.x and Node 22+. **This plugin itself has no npm runtime dependencies.** The optional QQ channel has two transports: the **built-in QQ bot** (enter your QQ 开放平台 AppID/AppSecret in the panel; this plugin connects itself, no third-party plugin) or a **bridge** to `@hualiong/dsh-qq-bot` if you already have it installed.
+
+**From npm** (recommended: prebuilt package, skips the `allowBuilds` build approval):
+
+```powershell
+dsh plugin --profile <profile> add dsh-vocab-review
+```
 
 **From GitHub:**
 
