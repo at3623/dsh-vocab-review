@@ -19,11 +19,16 @@
 # gaokao | cet4 | cet6 | kaoyan | any (default CET-4). The user can override it
 # per import by naming the exam (高考/四级/六级/考研).
 #
-# The optional QQ channel is NOT implemented here: it is a bridge to the
-# third-party @hualiong/dsh-qq-bot plugin. This plugin only reads that bot's
-# state file (<DSH_HOME>/integrations/dsh-qq-bot/state.json) and calls its
-# send_qq_message tool. Install and bind the bot separately to use QQ review;
-# without it the QQ row in the panel reports that the bot is missing.
+# The optional QQ channel has two transports:
+# 1. built-in (default when configured in the panel): this plugin connects to the
+#    QQ 开放平台 itself with an AppID / AppSecret, no third-party plugin. The
+#    credentials are saved in settings.json via the sidebar panel, never here.
+# 2. bridge: if dsh-qq-bot is installed/bound instead, its state file and
+#    send_qq_message tool are used.
+# One QQ bot app can only hold one gateway connection: do not run the built-in
+# client and dsh-qq-bot on the same AppID.
+#
+# qqApiBase overrides the QQ 开放平台 API host (default https://api.sgroup.qq.com).
 - insert:
     - id: vocab-review
       name: dsh-vocab-review
@@ -35,6 +40,7 @@
         verifyAnswers: true
         articleMaxWords: 20
         examLevel: cet4
+        qqApiBase: https://api.sgroup.qq.com
         ladderMinutes: [30, 180, 720, 2880, 10080, 43200]
         highMultiplier: 0.7
         lowMultiplier: 1.6

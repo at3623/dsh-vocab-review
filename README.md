@@ -3,7 +3,7 @@
 **上传一张划线的单词表图片，插件就把它变成逐词抽查；没有划线的文章图片，它会挑出文章里的考试高频词（高考/CET-4/CET-6/考研）加进词库。**
 [中文文档](#中文文档) · [English docs](#english-docs)
 
-DeepSeek Harness（DSH）插件 · 无额外 npm 依赖 · 数据只在本机 · 可选 QQ 通道
+DeepSeek Harness（DSH）插件 · 零运行时依赖 · 数据只在本机 · 可选内置 QQ 机器人
 会 / 半会 / 不会三档判定 · 模型判对也会被插件复核 · 薄弱词本可导出 CSV/JSON/Anki · 文章图片按考试高频收词 · 间隔随表现微调
 
 ---
@@ -80,22 +80,22 @@ dsh plugin --profile <profile> add github:at3623/dsh-vocab-review
 3. 在对话里按提示回答中文释义；答完一个，插件自动问下一个。不确定就直说「好像…」，那是 `🤔` 档，会提前回来重问。
 4. 答错不要紧：错词进入错词池，按间隔阶梯自动回来重问；侧栏面板里能看到薄弱词本。
 
-要求：DSH 0.2.x、Node 22+，**本插件本身没有任何 npm 运行时依赖**。QQ 通道是可选功能，由第三方插件 `@hualiong/dsh-qq-bot` 提供连接，需要单独安装并完成绑定（见下文「依赖与第三方组件」）。
+要求：DSH 0.2.x、Node 22+，**本插件本身没有任何 npm 运行时依赖**。QQ 通道可选，而且有两种接法：**内置 QQ**（你在面板里填 QQ 开放平台的 AppID/AppSecret，本插件自己连，不需要任何第三方插件）或**桥接 `@hualiong/dsh-qq-bot`**（如果你已经装了它）。详见下文「QQ 通道」与「依赖与第三方组件」。
 
 ### 依赖与第三方组件
 
-**这个插件本身没有任何 npm 运行时依赖**：读图导入、词表调度、三档判定与复核、难度因子 ease、每日限额、到期提醒、侧栏面板、ledger 存储、CSV/JSON/Anki 导出，全部是本插件自己的代码（`index.js` + `client.js` + `locale/` + `icon.svg`）。
+**这个插件本身没有任何 npm 运行时依赖**：读图导入、词表调度、三档判定与复核、难度因子 ease、每日限额、到期提醒、侧栏面板、ledger 存储、CSV/JSON/Anki 导出，以及**内置 QQ 机器人**（QQ 开放平台鉴权、WebSocket 网关、收发消息、图片下载，用的是 Node 自带的 `fetch`/`WebSocket`），全部是本插件自己的代码（`index.js` + `client.js` + `qq/` + `locale/` + `icon.svg`）。
 
-唯一借助外部组件的功能是 **QQ 通道**：QQ 登录、机器人连接、收发消息/文件都由第三方插件 [`@hualiong/dsh-qq-bot`](https://github.com/hualiong/dsh-qq-bot) 完成。本插件只做桥接，**不包含任何 QQ 协议实现，也没有把它的代码打包进来**。
+第三方插件 `@hualiong/dsh-qq-bot` 只是**可选的另一种接法**：如果你已经装了它，本插件也可以只做桥接（见下表）。两种 QQ 通道二选一，不要同时连同一个 AppID。
 
 | 组件 | 来源 | 本插件怎么用它 | 边界 |
 | --- | --- | --- | --- |
-| `@hualiong/dsh-qq-bot`（0.4.x，MIT） | 第三方社区插件，作者 hualiong，[GitHub](https://github.com/hualiong/dsh-qq-bot) | ① 只读它写在本机的状态文件 `<DSH_HOME>/integrations/dsh-qq-bot/state.json`（`sessionId`、`target`、`ownerOpenId`）；② 只调用它注册的全局工具 `send_qq_message({ text })` | 不装它 → 面板显示「未检测到 QQ 机器人插件」，QQ 功能不可用，网页复习不受影响；不复制/不包含它的代码；不读 AppID/AppSecret；不另开 QQ 连接 |
+| **内置 QQ**（本插件自带） | 本仓库 `qq/client.js`、`qq/bridge.js`，零依赖 | 直连 QQ 开放平台：`bots.qq.com` 换 token → `api.sgroup.qq.com/gateway` 的 WebSocket → 收 `C2C_MESSAGE_CREATE` / `GROUP_AT_MESSAGE_CREATE` → 文字/图片交给所选 DSH 会话 → 回复用被动消息或主动推送 | 需要你自己的机器人 AppID/AppSecret；AppSecret 明文存在本机 `settings.json`；一个机器人 App 只能有一个网关连接 |
+| `@hualiong/dsh-qq-bot`（0.4.x，MIT） | 第三方社区插件，作者 hualiong，[GitHub](https://github.com/hualiong/dsh-qq-bot) | 只在**没配内置 QQ** 时作为回退：① 读它的状态文件 `<DSH_HOME>/integrations/dsh-qq-bot/state.json`（`sessionId`、`target`、`ownerOpenId`）；② 调用它注册的全局工具 `send_qq_message({ text })` | 不装它也能用 QQ（走内置）；不复制/不包含它的代码；不读它的 AppSecret；它的入站只支持文字 |
 
-- 依赖接口只有两个、都很窄：状态文件里的 `sessionId` / `target.targetId` 决定「推给哪个会话、发到哪个 QQ」，工具名 `send_qq_message` 负责实际发送。若上游改了这两个契约，QQ 通道会失效（面板显示错误，网页复习照常）。
-- 因此本插件的 `package.json` **不声明**对它的依赖，发布包里也没有任何第三方代码；想用 QQ 就单独安装并绑定（见「QQ 通道」一节）。
-- `@hualiong/dsh-qq-bot` 自己依赖腾讯官方 `@tencent-connect/qqbot-*` 和 `qrcode`，这些依赖属于它、不属于本插件。
-- 版本对照：本插件按 `@hualiong/dsh-qq-bot` 0.4.2 的状态文件与 `send_qq_message` 工具验证过；更新该机器人后若 QQ 相关行为异常，先看面板的 QQ 错误提示。
+- 内置 QQ 的依赖接口只有两个公开协议：QQ 开放平台的 token/gateway/message REST 与 WebSocket（Node 22+ 自带，无 SDK）。
+- 本插件的 `package.json` **不声明**对 `dsh-qq-bot` 的依赖，发布包里也没有任何第三方代码。
+- `@hualiong/dsh-qq-bot` 自己依赖腾讯官方 `@tencent-connect/qqbot-*` 和 `qrcode`，这些依赖属于它、不属于本插件；本插件按它 0.4.2 的状态文件与 `send_qq_message` 工具验证过桥接模式。
 
 ### 复习是怎么跑起来的
 
@@ -224,17 +224,31 @@ dsh plugin --profile <profile> add github:at3623/dsh-vocab-review
 
 选中的对话被归档/删除时，自动回落到第一个可用对话。若从别的对话导入词表，队列会保存并等你在选中的对话里点开始。
 
-### QQ 通道（可选的第三方机器人插件）
+### QQ 通道：内置机器人（推荐）或桥接 dsh-qq-bot
 
-QQ 功能**不是本插件实现的**，而是桥接第三方插件 `@hualiong/dsh-qq-bot`（见上文「依赖与第三方组件」）。安装该机器人插件并完成绑定后，可以在 QQ 里复习同一份词表：
+#### 方式一：内置 QQ（本插件自己连，不依赖第三方插件）
 
-- 面板出现 QQ 一行：**在 QQ 上复习** = 切到 QQ 绑定的会话并置 `channel: "qq"`；**回到网页复习** = 切回原对话。若未安装/未绑定，这一行会显示「未检测到 QQ 机器人插件」或「尚未绑定会话」。
-- 题目由**插件推**：通过机器人的 `send_qq_message` 工具直接发 `Q: {word}`，不依赖模型主动发言；下一题会等批改消息那一轮结束后 +1.5 秒再发，避免抢话。
-- 答案仍由**模型批改**，但插件会复核：你在 QQ 里回复 → 机器人以 `[QQ] …` 投给绑定会话 → 模型只回一行 `✅/🤔/❌ {word} = {meaning}` → 机器人转发 → 插件记录；模型给的 ✅ 若跟已存词义不符，插件仍按错处理，`🤔` 走半档。
-- 到期提醒也会推到同一个 QQ 聊天，仍受 `reminderMaxPerDay` 限制。
-- **入站只转发文字**（这是 `dsh-qq-bot` 的实现限制，不是 QQ 平台限制）：QQ 平台本身支持私聊发图片，它用的 SDK 也把图片放在 `message.attachments`（`content_type` / `url` / `filename`）里；但这个机器人的入站桥接只读文本 `content`，图片消息的 content 为空时它直接回「目前只支持文字消息」，提交给 DSH 的内容也始终是纯文本（`[{ type: 'text' }]`）。所以图片导入请在网页对话里做，或者在 QQ 里贴文字（文章文字也行，走 `vocab_import_article`）；导入后在 QQ 里复习即可，词表和计划两边共用。
-- 反过来，机器人的**出站**方向支持图片/文件：`send_qq_message` 的 `image` / `file` 参数走 QQ 富媒体（`msg_type=7`，图片上限 20MB、文件 200MB），只是本插件目前没有用它发图。
-- 发送失败会显示在面板上，并写入 `ledger.json` 的 `qqError`。
+适合想「装一个插件就够」的人。用的是 QQ 开放平台的官方协议，Node 自带的 `fetch` + `WebSocket`，零依赖。
+
+1. 到 [q.qq.com](https://q.qq.com) 创建机器人，拿到 **AppID / AppSecret**；开通「私聊消息」和/或「群@消息」权限，把你自己加进沙箱成员（没上线前只有沙箱成员能聊）。
+2. DSH 侧栏 **单词复习** 面板 → 展开「内置 QQ 机器人」→ 填 AppID / AppSecret（接口地址默认 `https://api.sgroup.qq.com`）→ **保存并连接**。状态会依次变成「连接中 → 已连接」，AppSecret 只存本机 `settings.json`，面板只显示是否已保存。
+3. 在 QQ 里给机器人发一条消息（私聊直接发，群里 @ 它）。之后就能：
+   - 发 **「开始背单词 / 统计 / 停止」** 直接控制复习（插件自己处理，不消耗模型轮次）；
+   - **发图片**：有划线的单词表 → 导入划线词；没划线的文章 → 按考试高频词导入（这正是桥接模式做不到的）；
+   - 直接回复答案 → 交给绑定会话里的模型批改 → 插件记录并推下一题；
+   - 到期提醒、自动停下说明也会推到同一个 QQ 聊天。
+4. 面板上的 QQ 行显示「内置 QQ 已连接」；连不上时把错误显示在面板和诊断区。
+
+**限制与注意事项**
+
+- 同一个 QQ 机器人 AppID **只能有一个网关连接**：内置通道和 `dsh-qq-bot` 不要同时用同一个 AppID（会互相踢下线）。要用两个就建两个机器人应用。
+- AppSecret 明文保存在本机 `settings.json`（与「数据只在本机」一致，不上传）；导出/分享配置前记得清掉。
+- 只做「私聊 + 群 @」的文字/图片收发：没有按钮、没有流式更新、没有多机器人/多会话绑定——这些是通用聊天机器人的能力，背单词用不上。
+- 官方平台权限/审核规则可能变化；连不上时先看面板错误与 DSH 日志里的 `[qq]` 行。
+
+#### 方式二：桥接第三方 `@hualiong/dsh-qq-bot`
+
+如果你已经装了 `dsh-qq-bot`（见「依赖与第三方组件」），也可以让本插件走它：面板 QQ 行显示桥接状态，题目通过它的 `send_qq_message` 发，答案从它的 `[QQ] …` 入站消息里解析。注意它的**入站只支持文字**（图片消息会被它直接拒掉），所以桥接模式下图片导入请在网页对话里做，或者把文章文字贴到 QQ。
 
 ### 停止：强暂停
 
@@ -267,7 +281,8 @@ QQ 功能**不是本插件实现的**，而是桥接第三方插件 `@hualiong/d
 | `startPrompt` / `continuePrompt` | `开始词汇复习` / `继续复习` | 注入的提示词 |
 | `dataDir` | `<DSH_HOME>/vocab-review` | 数据目录 |
 | `channel` | `auto` | `auto` / `qq` / `session` |
-| `qqStatePath` | `<DSH_HOME>/integrations/dsh-qq-bot/state.json` | QQ 机器人状态文件 |
+| `qqStatePath` | `<DSH_HOME>/integrations/dsh-qq-bot/state.json` | 桥接模式读取的机器人状态文件 |
+| `qqApiBase` | `https://api.sgroup.qq.com` | 内置 QQ 的接口地址（一般不用改，面板里也能填） |
 
 ### 性能与可观测性
 
@@ -277,7 +292,8 @@ QQ 功能**不是本插件实现的**，而是桥接第三方插件 `@hualiong/d
 
 ### 隐私与安全
 
-- **不联网、不上报、不需要任何密钥。** 全部逻辑跑在本机 Host。
+- **不联网、不上报、不需要任何密钥**（除你主动启用的内置 QQ：它需要 QQ 开放平台的 AppID/AppSecret 才能连网关）。全部逻辑跑在本机 Host。
+- **AppSecret 只存在本机 `settings.json`**（明文，面板只显示「已保存」；状态接口永远不返回 secret）。
 - **单词表图片不会被插件读取或保存**：读图由聊天模型完成，只把纯文本词表交给插件。
 - 插件只写两个文件：`<DSH_HOME>/vocab-review/ledger.json`（词表/队列/计数）与 `settings.json`（限额、所选对话、提醒记录），原子写入（临时文件 + rename）。
 - 强暂停只碰**被选中**会话的 Agent / jobs / terminals / 子代理，不动别的会话。
@@ -286,11 +302,12 @@ QQ 功能**不是本插件实现的**，而是桥接第三方插件 `@hualiong/d
 ### 测试
 
 ```powershell
-npm test          # 三个离线 harness
+npm test          # 4 个离线 harness
 npm run check     # 语法检查
 ```
 
 - `test/harness.mjs` —— 29 项：导入、✅/❌/🤔 记账、压缩注入、停止/继续、每日限额、面板改限额、每日提醒、跨天清零、重启持久化、QQ 通道、**自动续轮**、QQ 自动停下时推一条说明、**插件否决模型 ✅**、**模糊半档**、**🤔 后正常 ✅ 升档**、**薄弱词本 + 已掌握/重问/删除 + CSV 导出**、**ledger 版本守卫**、**「不知道」一律算错**、**短中文近义半会并记入词义池**、**文章导入（过滤基础词 + 拒收 `:out` 超纲词 + 限流 + 不自动开始）**、**文章导入边界（全是基础词 / 已有词）**、**考试范围（单次指定考试、`:out` 拒收、`examLevel` 默认值）**、**难度因子 ease**、**CSV/JSON/Anki 三种导出**、**每日历史**、**诊断字段与上次导入**、**1500 词性能**。
+- `test/qq-builtin.mjs` —— 内置 QQ 的离线联调（假网关 + 假 HTTP）：token→gateway→identify、心跳、入境文字→会话提示→回传、入境图片→图片块、命令「开始背单词」直接推题、答题批改后推下一题、消息去重、断线/禁用状态。
 - `test/sessions-stop.mjs` —— 对话列表/选择持久化/路由、强暂停、归档回落。
 - `test/client-load-check.mjs` —— 用 mock loader 跑一遍 Client 半边，确认侧栏与面板注册。
 - `test/make_test_image.py` —— 重新生成 3 个划线词的测试图片。
@@ -312,7 +329,7 @@ Underlined-word vocabulary review for DeepSeek Harness. This README is bilingual
 
 ## Install
 
-Requires DeepSeek Harness 0.2.x and Node 22+. **This plugin itself has no npm runtime dependencies.** The optional QQ channel is provided by the third-party `@hualiong/dsh-qq-bot` plugin, which has to be installed and bound separately (see “Dependencies & third-party components” below).
+Requires DeepSeek Harness 0.2.x and Node 22+. **This plugin itself has no npm runtime dependencies.** The optional QQ channel has two transports: the **built-in QQ bot** (enter your QQ 开放平台 AppID/AppSecret in the panel; this plugin connects itself, no third-party plugin) or a **bridge** to `@hualiong/dsh-qq-bot` if you already have it installed.
 
 **From GitHub:**
 
@@ -326,26 +343,27 @@ The bundle patch inserts the `vocab-review` row; the Client half is discovered f
 
 ## Dependencies & third-party components
 
-**This plugin has no npm runtime dependencies.** Image reading/import, the word schedule, three-tier grading and verdict verification, the ease factor, daily quota, due reminders, the sidebar panel, the ledger, and the CSV/JSON/Anki exports are all implemented in this repository (`index.js` + `client.js` + `locale/` + `icon.svg`).
+**This plugin has no npm runtime dependencies.** Image reading/import, the word schedule, three-tier grading and verdict verification, the ease factor, daily quota, due reminders, the sidebar panel, the ledger, the CSV/JSON/Anki exports, and the **built-in QQ bot** (QQ 开放平台 auth, WebSocket gateway, messages, image download — using Node's own `fetch`/`WebSocket`) are all implemented in this repository (`index.js` + `client.js` + `qq/` + `locale/` + `icon.svg`).
 
-The only external component is the **QQ channel**: QQ login, the bot connection and message/file delivery are done by the third-party plugin [`@hualiong/dsh-qq-bot`](https://github.com/hualiong/dsh-qq-bot). This plugin only bridges to it — it contains **no QQ protocol implementation and does not bundle any of the bot's code**.
+The third-party `@hualiong/dsh-qq-bot` plugin is only an **alternative transport** when you already run it. Pick one: the built-in client and the bot must not use the same AppID (one QQ bot can only hold one gateway connection).
 
 | Component | Source | How this plugin uses it | Boundary |
 | --- | --- | --- | --- |
-| `@hualiong/dsh-qq-bot` (0.4.x, MIT) | Third-party community plugin by hualiong, [GitHub](https://github.com/hualiong/dsh-qq-bot) | ① reads the bot's local state file `<DSH_HOME>/integrations/dsh-qq-bot/state.json` (`sessionId`, `target`, `ownerOpenId`); ② calls the global tool `send_qq_message({ text })` the bot registers | Without the bot the panel says “QQ bot plugin not detected” and QQ review is unavailable; the bot's code is not copied or bundled; no AppID/AppSecret is read; no second QQ connection is opened |
+| **Built-in QQ** (shipped here) | `qq/client.js` + `qq/bridge.js` in this repo, zero dependencies | Connects to QQ 开放平台 itself: token from `bots.qq.com`, WebSocket from `api.sgroup.qq.com/gateway`, receives `C2C_MESSAGE_CREATE` / `GROUP_AT_MESSAGE_CREATE`, sends text and images to the selected DSH session, replies passively or as a push | Needs your own bot AppID/AppSecret; the secret is stored in plain text in the local `settings.json`; one bot app = one gateway connection |
+| `@hualiong/dsh-qq-bot` (0.4.x, MIT) | Third-party community plugin by hualiong, [GitHub](https://github.com/hualiong/dsh-qq-bot) | Used only as a fallback when the built-in client is not configured: reads its state file `<DSH_HOME>/integrations/dsh-qq-bot/state.json` (`sessionId`, `target`, `ownerOpenId`) and calls its `send_qq_message({ text })` tool | Inbound is text-only there; its code is not copied or bundled; its AppSecret is not read |
 
-- The contract is two narrow interfaces: `sessionId` / `target.targetId` in the state file decide which session to route and which QQ chat to push to, and the tool name `send_qq_message` performs the send. If the upstream plugin changes either, the QQ channel stops working (the panel shows the error; web review is unaffected).
-- Therefore this plugin's `package.json` declares **no** dependency on it and ships none of its code. To use QQ, install and bind the bot separately (see the QQ channel section).
-- `@hualiong/dsh-qq-bot` itself depends on Tencent's `@tencent-connect/qqbot-*` and `qrcode`; those belong to it, not to this plugin.
-- Version note: this plugin is verified against `@hualiong/dsh-qq-bot` 0.4.2 (its state-file shape and `send_qq_message` tool). If QQ behaviour breaks after a bot update, check the QQ error line in the panel first.
+- The built-in client talks only to the documented QQ Open Platform endpoints; no SDK and no extra package.
+- This plugin's `package.json` declares no dependency on `dsh-qq-bot` and ships none of its code. `dsh-qq-bot` itself depends on Tencent's `@tencent-connect/qqbot-*` and `qrcode`; those belong to it. The bridge mode is verified against 0.4.2 (state-file shape + `send_qq_message`).
+- One QQ bot app can only hold one gateway connection: do not run the built-in client and `dsh-qq-bot` on the same AppID; create a second bot app if you want both.
 
 ## Security & privacy
 
-- **No network calls, no telemetry, no credentials.** The plugin runs entirely on the local Host.
-- The worksheet image is **never read or stored by the plugin**; the chat model extracts the underlined words and calls `vocab_import` with plain text.
-- The plugin writes only two files under `<DSH_HOME>/vocab-review/`: `ledger.json` (words/queue/counters) and `settings.json` (limits, selected conversation, reminder bookkeeping).
+- **No telemetry.** Everything runs on the local Host. The only outbound traffic is the QQ Open Platform connection when you enable the built-in bot (or the bot plugin's own traffic in bridge mode).
+- The **built-in QQ AppSecret** is stored in plain text in the local `settings.json`; the state API only reports whether it is set, never the value.
+- The worksheet image is **never read or stored by the plugin**; the chat model extracts the underlined words and calls `vocab_import` with plain text. (A QQ image is downloaded to memory, passed as a prompt image block, and discarded.)
+- The plugin writes only two files under `<DSH_HOME>/vocab-review/`: `ledger.json` (words/queue/counters/QQ target) and `settings.json` (limits, selected conversation, reminder bookkeeping, optional QQ credentials).
 - The strong-pause Stop only touches the **selected** session: its Agent, its background jobs/terminals, and its child subagents — never other sessions.
-- The QQ channel only reads `<DSH_HOME>/integrations/dsh-qq-bot/state.json` (bound session id + last chat target) and delivers through the bot's own `send_qq_message` tool. It never reads the AppID/AppSecret and never opens a second QQ connection.
+- In bridge mode the QQ channel only reads `<DSH_HOME>/integrations/dsh-qq-bot/state.json` (bound session id + last chat target) and delivers through the bot's own `send_qq_message` tool; it never reads that bot's credentials.
 
 ## What it does
 
@@ -491,17 +509,27 @@ The panel has a dropdown listing the user's existing DSH conversations (title on
 
 If the selected conversation is archived or deleted, the panel falls back to the first live conversation. Importing words from a different conversation stores the queue and waits for Start in the selected one (the import result says so).
 
-## QQ channel (optional third-party bot)
+## QQ channel: built-in bot (recommended) or dsh-qq-bot bridge
 
-QQ is **not implemented by this plugin**: it bridges the third-party `@hualiong/dsh-qq-bot` plugin (see “Dependencies & third-party components”). Once that bot is installed, bound to a session, and its owner has messaged it once, the same review can run in the QQ chat:
+## QQ channel: built-in bot (recommended) or dsh-qq-bot bridge
 
-- The panel shows a QQ row: **Review on QQ** switches the selected conversation to the QQ-bound session and sets `channel: "qq"` in `settings.json`; **Back to web chat** returns to the previous conversation. Picking any conversation in the dropdown overrides a forced channel; picking the QQ-bound one re-enters QQ mode automatically under the default `auto` channel. Without the bot or a binding the row says “QQ bot plugin not detected” / “no bound session”.
-- **Delivery is plugin-driven.** The plugin pushes `Q: {word}` to QQ through the bot's `send_qq_message` tool (`tools.get('send_qq_message')`), so no model turn is needed to carry a question. A next question waits for the graded answer's turn to end plus a 1.5 s head start, so the bot's reply is never overtaken.
-- **Answers stay model-graded.** The user replies in QQ; the bot prompts the bound session with `[QQ] …`; the model sees the QQ protocol section (QUEUE head = pending word, reply exactly one `✅/🤔/❌ {word} = {meaning}` line); the bot relays that line; the plugin records it from the same session event stream it already watches and queues the next question.
-- **Due reminders** are pushed to the same QQ chat, still capped by `reminderMaxPerDay` (default 1/day).
-- **Inbound is text-only in the bot** (a `dsh-qq-bot` limitation, not a QQ platform one): QQ private chats do support images, and the SDK exposes them as `message.attachments` (`content_type` / `url` / `filename`), but the bot's inbound bridge only reads the text `content`, answers “目前只支持文字消息” when an image message has no text, and always submits `[{ type: 'text' }]` to DSH. Import the worksheet/article image from the Web chat, or paste the text in QQ (`vocab_import_article` handles article text); the ledger and schedule are shared either way.
-- The bot's **outbound** direction does support media: `send_qq_message` accepts `image` / `file` (QQ rich media, `msg_type=7`, 20 MB images / 200 MB files), but this plugin does not send images today.
-- If the bot is missing, unbound, or a send fails, the panel row reports it and the error is persisted as `qqError` in `ledger.json`. The state file location can be overridden with the `qqStatePath` plugin config.
+### Built-in QQ bot (self-hosted, no third-party plugin)
+
+The built-in client uses the official QQ Open Platform protocol with Node's own `fetch` and `WebSocket` — no SDK, no npm package:
+
+1. Create a bot at [q.qq.com](https://q.qq.com), copy its **AppID / AppSecret**, enable the 私聊消息 and/or 群@消息 permissions, and add yourself to the sandbox members (only sandbox members can chat before release).
+2. In the DSH sidebar **Vocabulary review** panel, open **Built-in QQ bot**, enter AppID / AppSecret (API base defaults to `https://api.sgroup.qq.com`) and press **Save & connect**. The status becomes “connecting → connected”. The secret is stored only in the local `settings.json`; the panel never shows it again.
+3. Send the bot one message in QQ (private chat directly, or @ it in a group). Then you can:
+   - send **开始背单词 / 统计 / 停止** to control the loop (handled by the plugin itself, no model turn);
+   - **send an image**: an underlined word list imports its underlined words; a plain article imports its exam-high-frequency words — the thing the bridge cannot do;
+   - reply with an answer → the model in the selected session grades it → the plugin records it and pushes the next question;
+   - due reminders and automatic-stop notes arrive in the same QQ chat.
+
+Limits: one QQ bot app can hold only one gateway connection (do not run the built-in client and `dsh-qq-bot` on the same AppID); the AppSecret is plain text in the local `settings.json`; only C2C + group @ text/images (no buttons, no streaming, no multi-chat bindings); if the platform changes permissions or the connection fails, the panel error and the `[qq]` log lines show why.
+
+### Bridge to `@hualiong/dsh-qq-bot`
+
+If you already run that bot (see “Dependencies & third-party components”), the plugin can use it instead: the panel QQ row shows the bridge state, questions go out through its `send_qq_message` tool, and answers come back from its `[QQ] …` inbound messages. Its **inbound is text-only** (image messages are rejected there), so import images from the Web chat or paste the article text into QQ.
 
 ## Stop (strong pause, req. 8)
 
@@ -525,6 +553,7 @@ It is silent: no prompt, no `steer`, no fake transcript message. Afterwards the 
 
 - `npm test` — runs the three offline harnesses below.
 - `node test/harness.mjs` — Host harness: 3-word import, ✅/❌ ledger updates, compact injection, loop Pause (no prompt, queue kept), Start resume without double-counting, `dailyTotalLimit=5`, live settings edits, once-per-day reminder, date rollover, reload persistence, the QQ channel (binding discovery, Start pushes `Q:` through `send_qq_message` without prompting the web session, QQ-graded answer recorded, next question pushed only after that turn ends), continuous review (with `queueSize: 2` the loop still asks all 5 due words, then goes `idle` with a `no-due` reason), the QQ idle note, **the plugin veto (a model `✅` with a different meaning is scheduled as wrong)**, **the fuzzy half-step**, **a fuzzy followed by a matching ✅ advancing the ladder**, **the weak-word book plus Known/Ask again/Remove and the CSV export**, **the ledger schema guard**, **"不知道" being wrong even when the model says `✅`**, **a half-matched rewording graded half-known and joining the gloss pool**, **the article import (basic words filtered, `:out` refused, batch capped, loop waiting for Start, protocol updated)**, **the article edge cases (all-basic list, already-known words)**, **the exam scope (per-call exam level, `:out` refusal, `examLevel` as the default)**, **the ease factor**, **CSV/JSON/Anki exports**, **the daily history**, **diagnostics + last import**, and **the 1500-word performance check**.
+- `node test/qq-builtin.mjs` — offline built-in QQ test with a fake gateway and fake HTTP: token → gateway → identify, heartbeat, inbound text → session prompt → relay, inbound image → image prompt block, 开始背单词 pushing `Q:` directly, grading round trip + next question, message deduplication, disconnect/disable status.
 - `node test/sessions-stop.mjs` — conversation list (titles, archived/subagent excluded), selection persisted in `settings.json` + reload, Start routed to the selected session, strong-pause Stop (cancel + jobs/terminals/subagents, silent, `turnInFlight` false), idle Stop no-op, archived-selection fallback.
 - `node test/client-load-check.mjs` — evaluates the Client bundle with a mocked module loader and asserts the sidebar/main registrations.
 - `test/make_test_image.py` — regenerates the 3-underlined-word fixture (`pip install pillow`).
@@ -537,4 +566,5 @@ It is silent: no prompt, no `steer`, no fake transcript message. Afterwards the 
 - The continuation prompt (`继续复习`) is a visible user-role message by design — it is the wake-up for the next question.
 - Browser notifications require the user to grant permission; the sidebar badge and panel banner always work without it.
 - The plugin-side verification is a heuristic: a synonym that shares nothing with the stored gloss may be counted wrong once; `verifyAnswers: false` disables it.
+- The built-in QQ bot needs your own QQ 开放平台 AppID/AppSecret and the matching permissions; one bot app supports one gateway connection (built-in and `dsh-qq-bot` cannot share an AppID). The AppSecret is plain text in the local `settings.json`.
 - The exam high-frequency words are **chosen by the model against the syllabus frequency**; the plugin refuses `:out` words, filters its basic-word list, deduplicates and caps the batch. If a word you wanted got filtered, add it through a typed word list. A blurry image yields few words — a clearer photo or the pasted text works better.

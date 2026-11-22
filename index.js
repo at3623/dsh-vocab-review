@@ -21,6 +21,9 @@ import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSyn
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
+import { QqClient } from './qq/client.js'
+import { createQqBridge } from './qq/bridge.js'
+
 const PLUGIN = 'dsh-vocab-review'
 const API_PREFIX = '/api/dsh-vocab-review'
 const REMINDER_TICK_MS = 60_000
@@ -63,6 +66,8 @@ const DEFAULTS = {
   // conversation is the QQ-bound session; 'qq' forces it; 'session' never does.
   channel: 'auto',
   qqStatePath: '',
+  // Built-in QQ bot (QQ 开放平台) endpoint; credentials live in settings.json.
+  qqApiBase: 'https://api.sgroup.qq.com',
 }
 
 const SETTINGS_KEYS = ['dailyNewLimit', 'dailyReviewLimit', 'dailyTotalLimit', 'dailyMinutesLimit', 'reminderMaxPerDay']
@@ -152,6 +157,9 @@ function resolveConfig(config) {
     qqStatePath: typeof raw.qqStatePath === 'string' && raw.qqStatePath.trim()
       ? raw.qqStatePath.trim()
       : join(dshHome, 'integrations', 'dsh-qq-bot', 'state.json'),
+    qqApiBase: typeof raw.qqApiBase === 'string' && raw.qqApiBase.trim()
+      ? raw.qqApiBase.trim()
+      : DEFAULTS.qqApiBase,
   }
 }
 
@@ -327,6 +335,8 @@ export function apply(ctx, config) {
   let state = loadLedger()
   let settings = loadSettings()
   let continueToken = 0
+  // Built-in QQ bot runtime ({ client, bridge }) when enabled in the panel.
+  let qqBuiltin = null
   // Cheap runtime diagnostics for the panel: no extra files, no logging deps.
   const diag = { lastSaveMs: 0, lastSaveAt: null, ledgerBytes: 0 }
 
@@ -357,6 +367,7 @@ export function apply(ctx, config) {
       reminderDueCount: 0,
       qqLastSendAt: null,
       qqError: '',
+      qqTarget: null,
       lastConflict: null,
       words: {},
     }
@@ -446,6 +457,15 @@ export function apply(ctx, config) {
         if (Number.isFinite(parsed.reminderDueCount)) next.reminderDueCount = parsed.reminderDueCount
         if (Number.isFinite(parsed.qqLastSendAt)) next.qqLastSendAt = parsed.qqLastSendAt
         if (typeof parsed.qqError === 'string') next.qqError = parsed.qqError
+        if (parsed.qqTarget && typeof parsed.qqTarget === 'object' && typeof parsed.qqTarget.id === 'string') {
+          next.qqTarget = {
+            scope: parsed.qqTarget.scope === 'group' ? 'group' : 'c2c',
+            id: parsed.qqTarget.id,
+            msgId: typeof parsed.qqTarget.msgId === 'string' ? parsed.qqTarget.msgId : '',
+            msgSeq: Number.isFinite(parsed.qqTarget.msgSeq) ? parsed.qqTarget.msgSeq : 0,
+            at: Number.isFinite(parsed.qqTarget.at) ? parsed.qqTarget.at : Date.now(),
+          }
+        }
         if (parsed.lastConflict && typeof parsed.lastConflict === 'object' && typeof parsed.lastConflict.word === 'string') {
           next.lastConflict = {
             word: parsed.lastConflict.word,
@@ -532,6 +552,11 @@ export function apply(ctx, config) {
       selectedSessionId: '',
       previousSessionId: '',
       channel: cfg.channel,
+      // Built-in QQ bot credentials + switch (settings.json only; never config).
+      qqAppId: '',
+      qqAppSecret: '',
+      qqApiBase: cfg.qqApiBase,
+      qqBuiltinEnabled: false,
     }
     try {
       if (!existsSync(settingsPath)) return next
@@ -547,6 +572,10 @@ export function apply(ctx, config) {
       if (typeof parsed.selectedSessionId === 'string') next.selectedSessionId = parsed.selectedSessionId
       if (typeof parsed.previousSessionId === 'string') next.previousSessionId = parsed.previousSessionId
       if (parsed.channel === 'qq' || parsed.channel === 'session' || parsed.channel === 'auto') next.channel = parsed.channel
+      if (typeof parsed.qqAppId === 'string') next.qqAppId = parsed.qqAppId
+      if (typeof parsed.qqAppSecret === 'string') next.qqAppSecret = parsed.qqAppSecret
+      if (typeof parsed.qqApiBase === 'string' && parsed.qqApiBase.trim()) next.qqApiBase = parsed.qqApiBase.trim()
+      if (parsed.qqBuiltinEnabled === true) next.qqBuiltinEnabled = true
       return next
     } catch (error) {
       ctx.logger?.warn?.(`${PLUGIN}: could not read ${settingsPath}: ${String(error)}`)
@@ -622,6 +651,16 @@ export function apply(ctx, config) {
   }
 
   async function ensureSelectedSession() {
+    if (qqBuiltinConnected()) {
+      const current = selectedSessionId()
+      if (current) return current
+      const rows = await listSessionOptions()
+      if (rows.length > 0) {
+        rememberSelected(rows[0].sessionId)
+        return rows[0].sessionId
+      }
+      return ''
+    }
     if (settings.channel === 'qq') {
       const binding = qqBinding()
       if (binding.available && binding.sessionId) return binding.sessionId
@@ -641,6 +680,8 @@ export function apply(ctx, config) {
   }
 
   function routedSessionId() {
+    // Built-in QQ bot: no bot-side session binding; use the selected DSH chat.
+    if (qqBuiltinConnected()) return selectedSessionId() || state.activeSessionId || ''
     const binding = qqBinding()
     if (binding.available && binding.sessionId) {
       if (settings.channel === 'qq') return binding.sessionId
@@ -697,9 +738,20 @@ export function apply(ctx, config) {
   function qqSendText(text) {
     const body = String(text === undefined || text === null ? '' : text).trim()
     if (!body) return Promise.resolve({ ok: false, error: 'empty QQ message' })
+    // Built-in QQ bot: talk to the QQ platform directly (no third-party plugin).
+    if (qqBuiltinConnected() && state.qqTarget) {
+      const target = { ...state.qqTarget }
+      return qqBuiltin.client
+        .sendText(target, body)
+        .then(() => ({ ok: true }))
+        .catch((error) => ({ ok: false, error: String(error && error.message ? error.message : error) }))
+    }
+    if (qqBuiltinConnected()) {
+      return Promise.resolve({ ok: false, error: '还没有 QQ 聊天目标：先在 QQ 里给机器人发一条消息' })
+    }
     const definition = qqTool()
     if (!definition) {
-      return Promise.resolve({ ok: false, error: 'send_qq_message 工具不可用：未安装或未启用 QQ 机器人插件' })
+      return Promise.resolve({ ok: false, error: 'QQ 通道未就绪：内置 QQ 未连接，也没有可用的 send_qq_message 工具' })
     }
     const args = { text: body }
     const execution = {
@@ -726,7 +778,131 @@ export function apply(ctx, config) {
     })
   }
 
+  // ── Built-in QQ bot lifecycle ───────────────────────────────────────────
+  function qqBuiltinConnected() {
+    return Boolean(qqBuiltin && qqBuiltin.client && qqBuiltin.client.state === 'connected')
+  }
+
+  function maskId(value) {
+    const id = String(value || '')
+    if (!id) return ''
+    if (id.length <= 8) return `${id.slice(0, 2)}…`
+    return `${id.slice(0, 4)}…${id.slice(-4)}`
+  }
+
+  function qqBuiltinStatus() {
+    const status = qqBuiltin ? qqBuiltin.client.status() : null
+    return {
+      configured: Boolean(settings.qqAppId && settings.qqAppSecret),
+      enabled: Boolean(settings.qqBuiltinEnabled),
+      appId: maskId(settings.qqAppId),
+      secretSet: Boolean(settings.qqAppSecret),
+      apiBase: settings.qqApiBase || cfg.qqApiBase,
+      state: status ? status.state : 'idle',
+      error: status ? status.error : '',
+      connectedAt: status ? status.connectedAt : null,
+      lastMessageAt: status ? status.lastMessageAt : null,
+      target: state.qqTarget ? { scope: state.qqTarget.scope, at: state.qqTarget.at } : null,
+    }
+  }
+
+  function sendToQqChat(message, text) {
+    if (!qqBuiltin) return Promise.resolve()
+    const target = { scope: message.scope, id: message.targetId, msgId: message.messageId, msgSeq: 0 }
+    return qqBuiltin.client.sendText(target, text).catch((error) => {
+      ctx.logger?.warn?.(`${PLUGIN}: [qq] reply failed: ${String(error && error.message ? error.message : error)}`)
+    })
+  }
+
+  const QQ_START = /^(?:开始|继续|开始背单词|开始复习|继续复习|start|continue)[\s!！。.]*$/iu
+  const QQ_STOP = /^(?:停止|暂停|结束|stop|pause)[\s!！。.]*$/iu
+  const QQ_STATS = /^(?:统计|状态|进度|stats|status)[\s!！。.]*$/iu
+
+  async function handleQqCommand(text, message) {
+    if (QQ_START.test(text)) {
+      const target = routedSessionId() || selectedSessionId() || ''
+      if (!target) {
+        await sendToQqChat(message, '还没有可用的对话：请先在 DSH 网页里打开或新建一个会话。')
+        return true
+      }
+      if (!selectedSessionId()) rememberSelected(target)
+      const result = startLoop(target)
+      if (!result.ok) {
+        const reason =
+          result.error === 'quota'
+            ? result.quota && result.quota.message
+            : '词库还是空的：先在 DSH 网页里上传单词表或文章图片导入。'
+        await sendToQqChat(message, reason || '暂时无法开始')
+        return true
+      }
+      const head = state.words[state.queue[0]]
+      if (head) await sendToQqChat(message, questionLine(head))
+      return true
+    }
+    if (QQ_STOP.test(text)) {
+      stopLoop()
+      await sendToQqChat(message, '已停止，队列保留。回「开始背单词」继续。')
+      return true
+    }
+    if (QQ_STATS.test(text)) {
+      const summary = publicState()
+      const next = summary.nextDueAt ? `，下一个到期 ${clockText(summary.nextDueAt)}` : ''
+      await sendToQqChat(
+        message,
+        `到期 ${summary.dueNow} 个 · 错词 ${summary.wrongCount} · 模糊 ${summary.fuzzyCount} · 共 ${summary.total} 词${next}。今日 ${summary.counters.total} 题。`,
+      )
+      return true
+    }
+    return false
+  }
+
+  function startQqBuiltin() {
+    if (qqBuiltin) return
+    if (!settings.qqBuiltinEnabled || !settings.qqAppId || !settings.qqAppSecret) return
+    const client = new QqClient({
+      appId: settings.qqAppId,
+      appSecret: settings.qqAppSecret,
+      apiBase: settings.qqApiBase || cfg.qqApiBase,
+      logger: ctx.logger,
+    })
+    const bridge = createQqBridge({
+      ctx,
+      logger: ctx.logger,
+      client,
+      resolveSession: () => selectedSessionId() || state.activeSessionId || '',
+      onCommand: handleQqCommand,
+      send: sendToQqChat,
+    })
+    client.onMessage = (message) => {
+      state.qqTarget = {
+        scope: message.scope,
+        id: message.targetId,
+        msgId: message.messageId,
+        msgSeq: 0,
+        at: Date.now(),
+      }
+      saveLedger()
+      bridge.accept(message)
+    }
+    qqBuiltin = { client, bridge }
+    ctx.logger?.info?.(`${PLUGIN}: [qq] starting built-in QQ bot (${maskId(settings.qqAppId)})`)
+    void client.start()
+  }
+
+  function stopQqBuiltin() {
+    if (!qqBuiltin) return
+    const current = qqBuiltin
+    qqBuiltin = null
+    void current.client.close()
+  }
+
+  function restartQqBuiltin() {
+    stopQqBuiltin()
+    startQqBuiltin()
+  }
+
   function qqMode() {
+    if (qqBuiltinConnected()) return settings.channel !== 'session'
     const binding = qqBinding()
     if (!binding.available || !binding.sessionId) return false
     if (settings.channel === 'session') return false
@@ -1951,24 +2127,30 @@ export function apply(ctx, config) {
 
   // ── Compact state for the sidebar panel and the local API ────────────────
   function qqStatus() {
+    const builtin = qqBuiltinStatus()
     const binding = qqBinding()
     const definition = qqTool()
     const rows = sessionCache.rows || []
     const bound = rows.find((row) => row.sessionId === binding.sessionId)
     const owner = binding.ownerOpenId || ''
+    const builtinActive = builtin.configured
     return {
-      installed: Boolean(binding.available || definition),
-      available: Boolean(binding.available && binding.sessionId && binding.target),
-      bound: Boolean(binding.available && binding.sessionId),
+      transport: builtinActive ? 'builtin' : binding.available || definition ? 'bot' : 'none',
+      builtin,
+      installed: Boolean(builtinActive || binding.available || definition),
+      available: builtinActive ? builtin.state === 'connected' : Boolean(binding.available && binding.sessionId && binding.target),
+      bound: builtinActive ? builtin.state === 'connected' : Boolean(binding.available && binding.sessionId),
       tool: Boolean(definition),
       channel: settings.channel,
       mode: qqMode(),
-      sessionId: binding.sessionId || '',
-      sessionTitle: bound ? bound.title : '',
-      owner: owner ? `${owner.slice(0, 4)}…` : '',
+      sessionId: builtinActive ? '' : binding.sessionId || '',
+      sessionTitle: builtinActive ? '内置 QQ' : bound ? bound.title : '',
+      owner: builtinActive ? '' : owner ? `${owner.slice(0, 4)}…` : '',
       statePath: binding.path,
       lastSendAt: Number.isFinite(state.qqLastSendAt) ? state.qqLastSendAt : null,
-      error: state.qqError || binding.error || (definition ? '' : 'send_qq_message 工具不可用：未安装或未启用 QQ 机器人插件'),
+      error: builtinActive
+        ? builtin.error || state.qqError
+        : state.qqError || binding.error || (definition ? '' : 'send_qq_message 工具不可用：未安装或未启用 QQ 机器人插件'),
     }
   }
 
@@ -2238,8 +2420,34 @@ export function apply(ctx, config) {
       else if (key === 'reminderMaxPerDay') next[key] = clampInt(n, 0, 10, settings[key])
       else next[key] = clampInt(n, 0, 10_000, settings[key])
     }
+    // Built-in QQ bot: credentials and switch. An empty secret keeps the saved
+    // one; "__clear__" removes it.
+    let qqChanged = false
+    if (body && typeof body.qqAppId === 'string' && body.qqAppId.trim() !== settings.qqAppId) {
+      next.qqAppId = body.qqAppId.trim()
+      qqChanged = true
+    }
+    if (body && typeof body.qqAppSecret === 'string') {
+      const secret = body.qqAppSecret
+      if (secret === '__clear__') {
+        next.qqAppSecret = ''
+        qqChanged = true
+      } else if (secret.trim() && secret.trim() !== settings.qqAppSecret) {
+        next.qqAppSecret = secret.trim()
+        qqChanged = true
+      }
+    }
+    if (body && typeof body.qqApiBase === 'string' && body.qqApiBase.trim() && body.qqApiBase.trim() !== settings.qqApiBase) {
+      next.qqApiBase = body.qqApiBase.trim()
+      qqChanged = true
+    }
+    if (body && typeof body.qqBuiltinEnabled === 'boolean') {
+      next.qqBuiltinEnabled = body.qqBuiltinEnabled
+      qqChanged = true
+    }
     settings = next
     saveSettings()
+    if (qqChanged) restartQqBuiltin()
     return settings
   }
 
@@ -2261,7 +2469,7 @@ export function apply(ctx, config) {
           }
           if (req.method === 'POST' && action === 'start') {
             const onQq = qqMode()
-            const sessionId = onQq ? qqBinding().sessionId : await ensureSelectedSession()
+            const sessionId = onQq && !qqBuiltinConnected() ? qqBinding().sessionId : await ensureSelectedSession()
             if (!sessionId) {
               writeJson(res, 200, { ok: false, error: { code: 'no-session', message: 'Select a conversation in the panel first.' } })
               return
@@ -2381,6 +2589,50 @@ export function apply(ctx, config) {
             })
             return
           }
+          if (req.method === 'POST' && action === 'qq/builtin/save') {
+            const body = await readJsonBody(req)
+            applySettingsPatch({
+              qqAppId: body && typeof body.appId === 'string' && body.appId.trim() ? body.appId : undefined,
+              qqAppSecret: body && typeof body.appSecret === 'string' ? body.appSecret : undefined,
+              qqApiBase: body && typeof body.apiBase === 'string' ? body.apiBase : undefined,
+              qqBuiltinEnabled: body && body.enabled !== false,
+            })
+            writeJson(res, 200, { ok: true, value: await stateWithSessions() })
+            return
+          }
+          if (req.method === 'POST' && action === 'qq/builtin/disable') {
+            applySettingsPatch({ qqBuiltinEnabled: false })
+            writeJson(res, 200, { ok: true, value: await stateWithSessions() })
+            return
+          }
+          if (req.method === 'POST' && action === 'qq/builtin/test') {
+            if (!qqBuiltinConnected()) {
+              writeJson(res, 200, {
+                ok: false,
+                error: { code: 'qq-not-connected', message: '内置 QQ 还没连上：先填 AppID / AppSecret 并启用，看状态变成「已连接」。' },
+                value: await stateWithSessions(),
+              })
+              return
+            }
+            if (!state.qqTarget) {
+              writeJson(res, 200, {
+                ok: false,
+                error: { code: 'qq-no-target', message: '还没有聊天目标：先在 QQ 里给机器人发一条消息。' },
+                value: await stateWithSessions(),
+              })
+              return
+            }
+            const sent = await qqSendText('【词汇复习】内置 QQ 通道测试：看到这条说明题目可以直接推送到你的 QQ。')
+            state.qqLastSendAt = Date.now()
+            state.qqError = sent.ok ? '' : sent.error
+            saveLedger()
+            writeJson(res, 200, {
+              ok: sent.ok,
+              error: sent.ok ? undefined : { code: 'qq-send-failed', message: sent.error },
+              value: { ...(await stateWithSessions()), qqTest: { ok: sent.ok, error: sent.error || '' } },
+            })
+            return
+          }
           if (req.method === 'POST' && action === 'interrupt') {
             const report = await strongPause()
             writeJson(res, 200, { ok: true, value: await stateWithSessions({ interrupt: report }) })
@@ -2454,6 +2706,11 @@ export function apply(ctx, config) {
     }),
     `${PLUGIN}: /api/dsh-vocab-review`,
   )
+
+  // The built-in QQ bot starts only when the panel saved credentials and
+  // enabled it; it is torn down with the plugin.
+  startQqBuiltin()
+  ctx.effect(() => () => stopQqBuiltin(), `${PLUGIN}: built-in QQ bot`)
 
   ctx.logger?.info?.(`${PLUGIN}: loaded, ledger at ${ledgerPath}, ${entries().length} words, loop=${state.loop}`)
 }

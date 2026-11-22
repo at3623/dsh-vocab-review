@@ -100,6 +100,21 @@ window.__ModuleLoader__.load({
       skippedBasicLabel: 'basic',
       skippedOutLabel: 'out of scope',
       wordsUnit: 'words',
+      qqBuiltin: 'Built-in QQ bot (self-hosted)',
+      qqAppId: 'AppID',
+      qqAppSecret: 'AppSecret',
+      qqSecretSaved: 'saved — leave empty to keep',
+      qqApiBase: 'API base',
+      qqBuiltinSave: 'Save & connect',
+      qqBuiltinDisable: 'Disconnect',
+      qqConnected: 'Built-in QQ connected',
+      qqConnecting: 'Built-in QQ connecting…',
+      qqReconnecting: 'Built-in QQ reconnecting…',
+      qqFailed: 'Built-in QQ failed',
+      qqOff: 'Built-in QQ off',
+      qqNoTarget: 'Send the bot a message in QQ once so it knows where to reply.',
+      qqBuiltinHint:
+        'Create a bot on q.qq.com, copy its AppID / AppSecret, enable 私聊/群@ messages and add yourself to the sandbox. The secret is stored locally in settings.json; one QQ bot can only hold one gateway connection, so disable dsh-qq-bot for the same AppID.',
     }
     const ZH = {
       title: '单词复习',
@@ -180,6 +195,21 @@ window.__ModuleLoader__.load({
       skippedBasicLabel: '基础词',
       skippedOutLabel: '超纲',
       wordsUnit: '词',
+      qqBuiltin: '内置 QQ 机器人（自己连）',
+      qqAppId: 'AppID',
+      qqAppSecret: 'AppSecret',
+      qqSecretSaved: '已保存，留空不改',
+      qqApiBase: '接口地址',
+      qqBuiltinSave: '保存并连接',
+      qqBuiltinDisable: '断开',
+      qqConnected: '内置 QQ 已连接',
+      qqConnecting: '内置 QQ 连接中…',
+      qqReconnecting: '内置 QQ 重连中…',
+      qqFailed: '内置 QQ 连接失败',
+      qqOff: '内置 QQ 未启用',
+      qqNoTarget: '先在 QQ 里给机器人发一条消息，它才知道往哪回。',
+      qqBuiltinHint:
+        '在 q.qq.com 创建机器人，复制 AppID / AppSecret，开通「私聊/群@消息」权限并把你自己加入沙箱。Secret 只存在本机 settings.json；同一个机器人只能有一个网关连接，若同时用 dsh-qq-bot 请换成另一个 AppID。',
     }
 
     let clientCtx = null
@@ -429,6 +459,19 @@ window.__ModuleLoader__.load({
       return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`
     }
 
+    function qqStateText(qq, t) {
+      const builtin = qq && qq.builtin ? qq.builtin : null
+      if (builtin && builtin.configured) {
+        if (builtin.state === 'connected') return t('qqConnected')
+        if (builtin.state === 'connecting') return t('qqConnecting')
+        if (builtin.state === 'reconnecting') return t('qqReconnecting')
+        if (builtin.state === 'failed') return `${t('qqFailed')}${builtin.error ? `：${builtin.error}` : ''}`
+        return t('qqOff')
+      }
+      if (!qq) return t('qqMissing')
+      return qq.available ? t('qqReady') : qq.bound ? t('qqUnbound') : t('qqMissing')
+    }
+
     function Panel() {
       const snapshot = useSnapshot()
       const [busy, setBusy] = React.useState(false)
@@ -440,6 +483,8 @@ window.__ModuleLoader__.load({
       const [qqBusy, setQqBusy] = React.useState(false)
       const [qqNote, setQqNote] = React.useState('')
       const [wordBusy, setWordBusy] = React.useState('')
+      const [qqDraft, setQqDraft] = React.useState({ appId: '', secret: '', apiBase: '' })
+      const [qqBuiltinBusy, setQqBuiltinBusy] = React.useState(false)
       useLocaleRevision()
       const t = clientCtx && clientCtx.locale ? clientCtx.locale.bind(NS) : (key) => key
 
@@ -547,7 +592,7 @@ window.__ModuleLoader__.load({
         api(path, { method: 'POST' })
           .then((value) => {
             publish(value)
-            if (path === 'qq/test') {
+            if (path === 'qq/test' || path === 'qq/builtin/test') {
               const test = value && value.qqTest ? value.qqTest : null
               if (test && test.ok) setQqNote(t('qqTestSent'))
               else if (test && test.error) setActionError(test.error)
@@ -559,6 +604,37 @@ window.__ModuleLoader__.load({
 
       const toggleQq = () => qqCall(qq && qq.mode ? 'qq/disable' : 'qq/enable')
       const testQq = () => qqCall('qq/test')
+
+      const builtinAction = (path, body) => {
+        if (qqBuiltinBusy) return
+        setQqBuiltinBusy(true)
+        setActionError('')
+        setQqNote('')
+        api(path, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(body || {}),
+        })
+          .then((value) => {
+            publish(value)
+            if (path === 'qq/builtin/save') setQqDraft({ appId: '', secret: '', apiBase: '' })
+          })
+          .catch((cause) => setActionError(String(cause && cause.message ? cause.message : cause)))
+          .finally(() => setQqBuiltinBusy(false))
+      }
+      const saveBuiltin = () =>
+        builtinAction('qq/builtin/save', {
+          appId: qqDraft.appId,
+          appSecret: qqDraft.secret,
+          apiBase: qqDraft.apiBase,
+          enabled: true,
+        })
+      const disableBuiltin = () => builtinAction('qq/builtin/disable')
+      const testBuiltin = () => builtinAction('qq/builtin/test')
+      const draftField = (key) => (event) => {
+        const value = event.target.value
+        setQqDraft((draft) => ({ ...(draft || {}), [key]: value }))
+      }
 
       // Wrong-word book actions: master (known), forget (ask again now),
       // remove (out of the ledger). All of them return a fresh snapshot.
@@ -651,29 +727,97 @@ window.__ModuleLoader__.load({
                 'div',
                 { className: `vr-qq${qq.mode ? ' vr-qq-on' : ''}` },
                 h('span', { className: 'vr-qq-dot', 'aria-hidden': 'true' }),
-                h(
-                  'span',
-                  { className: 'vr-qq-text' },
-                  qq.mode ? t('qqOn') : qq.available ? t('qqReady') : qq.bound ? t('qqUnbound') : t('qqMissing'),
-                ),
-                qq.available
+                h('span', { className: 'vr-qq-text' }, qqStateText(qq, t)),
+                qq.transport === 'bot' && qq.available
                   ? h(
                       'button',
                       { className: 'vr-qq-btn', type: 'button', onClick: toggleQq, disabled: qqBusy },
                       qq.mode ? t('qqDisable') : t('qqEnable'),
                     )
                   : null,
-                qq.available
+                qq.transport === 'bot' && qq.available
                   ? h(
                       'button',
                       { className: 'vr-qq-btn', type: 'button', onClick: testQq, disabled: qqBusy },
                       qqBusy ? t('qqSending') : t('qqTest'),
                     )
                   : null,
+                qq.transport === 'builtin' && qq.builtin && qq.builtin.state === 'connected'
+                  ? h(
+                      'button',
+                      { className: 'vr-qq-btn', type: 'button', onClick: testBuiltin, disabled: qqBuiltinBusy },
+                      qqBuiltinBusy ? t('qqSending') : t('qqTest'),
+                    )
+                  : null,
+                qq.transport === 'builtin' && qq.builtin && qq.builtin.configured
+                  ? h(
+                      'button',
+                      { className: 'vr-qq-btn', type: 'button', onClick: disableBuiltin, disabled: qqBuiltinBusy },
+                      t('qqBuiltinDisable'),
+                    )
+                  : null,
               )
             : null,
           qq && qq.mode && qq.error ? h('div', { className: 'vr-error', role: 'alert' }, qq.error) : null,
+          qq && qq.builtin && qq.builtin.state === 'connected' && !qq.builtin.target
+            ? h('div', { className: 'vr-hint' }, t('qqNoTarget'))
+            : null,
           qqNote ? h('div', { className: 'vr-qq-note' }, qqNote) : null,
+          h(
+            'details',
+            { className: 'vr-settings' },
+            h('summary', null, t('qqBuiltin')),
+            h(
+              'div',
+              { className: 'vr-grid' },
+              h(
+                'label',
+                { className: 'vr-field' },
+                h('span', null, t('qqAppId')),
+                h('input', {
+                  type: 'text',
+                  value: qqDraft.appId,
+                  placeholder: qq && qq.builtin && qq.builtin.appId ? qq.builtin.appId : 'AppID',
+                  onChange: draftField('appId'),
+                  disabled: qqBuiltinBusy,
+                }),
+              ),
+              h(
+                'label',
+                { className: 'vr-field' },
+                h('span', null, t('qqAppSecret')),
+                h('input', {
+                  type: 'password',
+                  value: qqDraft.secret,
+                  placeholder: qq && qq.builtin && qq.builtin.secretSet ? t('qqSecretSaved') : 'AppSecret',
+                  onChange: draftField('secret'),
+                  disabled: qqBuiltinBusy,
+                }),
+              ),
+              h(
+                'label',
+                { className: 'vr-field' },
+                h('span', null, t('qqApiBase')),
+                h('input', {
+                  type: 'text',
+                  value: qqDraft.apiBase,
+                  placeholder: qq && qq.builtin ? qq.builtin.apiBase : 'https://api.sgroup.qq.com',
+                  onChange: draftField('apiBase'),
+                  disabled: qqBuiltinBusy,
+                }),
+              ),
+            ),
+            h('div', { className: 'vr-hint' }, t('qqBuiltinHint')),
+            h(
+              'div',
+              { className: 'vr-save-row' },
+              h(
+                'button',
+                { className: 'vr-save', type: 'button', onClick: saveBuiltin, disabled: qqBuiltinBusy },
+                qqBuiltinBusy ? t('saving') : t('qqBuiltinSave'),
+              ),
+            ),
+          ),
           h(
             'div',
             { className: 'vr-stats', 'aria-live': 'polite' },
