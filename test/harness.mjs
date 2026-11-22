@@ -742,15 +742,18 @@ console.log('PASS partial: a short Chinese rewording of the stored gloss is not 
 const artDir = join(root, 'article')
 const artEnv = freshEnv(artDir, { articleMaxWords: 5 })
 const art = await artEnv.tools.get('vocab_import_article').execute(
-  { words: 'abandon, the, benefit, is, cautious, genuine:high, grocery, promote, school, theory' },
+  { words: 'abandon, the, benefit, is, cautious, genuine:high, grocery, promote, school, theory, quixotic:out' },
   { agent: artEnv.agent },
 )
 assert.equal(art.ok, true)
 assert.deepEqual(art.added, ['abandon', 'benefit', 'cautious', 'genuine', 'grocery'], 'the cap keeps the model order')
 assert.deepEqual(art.skippedBasic, ['the', 'is', 'school'], 'basic everyday words are filtered out')
+assert.deepEqual(art.notExam, ['quixotic'], 'words the model marked :out are refused')
 assert.deepEqual(art.overLimit, ['promote', 'theory'], 'the per-article cap is respected')
+assert.ok(art.message.includes('Scope: high-frequency words for the CET-4 exam'))
 assert.ok(art.message.includes('Added 5'))
 assert.ok(art.message.includes('Filtered out 3'))
+assert.ok(art.message.includes('out of scope'))
 assert.ok(art.message.includes('开始背单词'))
 assert.equal(artEnv.prompts.length, 0, 'an article import never starts the review loop')
 const artLedger = loadLedger(artDir)
@@ -766,6 +769,7 @@ assert.equal(artStarted.ok, true, 'Start after an article import begins the revi
 assert.equal(artEnv.prompts.length, 1)
 const artProtocol = artEnv.sections[0].text()
 assert.ok(artProtocol.includes('vocab_import_article'), 'the protocol tells the model about the article path')
+assert.ok(artProtocol.includes('HIGH-FREQUENCY IN REAL EXAMS'), 'the protocol asks for exam high-frequency words')
 assert.ok(artProtocol.includes('🤔'), 'the protocol still documents the three grades')
 console.log('PASS article image: basic words dropped, batch capped, loop waits for Start, protocol updated')
 
@@ -779,7 +783,7 @@ const artBasic = await artBasicEnv.tools.get('vocab_import_article').execute(
 assert.equal(artBasic.ok, true)
 assert.deepEqual(artBasic.added, [])
 assert.equal(artBasic.skippedBasic.length, 3)
-assert.ok(artBasic.message.includes('basic everyday word'))
+assert.ok(artBasic.message.includes('basic words or outside the exam scope'))
 assert.equal(loadLedger(artBasicDir).queue.length, 0)
 const artKnown = await artBasicEnv.tools.get('vocab_import_article').execute(
   { words: 'theory, the' },
@@ -794,6 +798,31 @@ assert.deepEqual(artAgain.added, ['cautious'])
 assert.deepEqual(artAgain.existing, ['theory'])
 assert.ok(artAgain.message.includes('Already known'))
 console.log('PASS article edge cases: all-basic imports explain themselves, known words are reported not re-added')
+
+// ── 24. Exam scope: per-call exam level, :out refused, config default ────
+const examDir = join(root, 'exam')
+const examEnv = freshEnv(examDir, { articleMaxWords: 10 })
+const exam = await examEnv.tools.get('vocab_import_article').execute(
+  { words: 'ubiquitous, precarious, quixotic:out, the', exam: 'kaoyan' },
+  { agent: examEnv.agent },
+)
+assert.equal(exam.ok, true)
+assert.deepEqual(exam.added, ['ubiquitous', 'precarious'])
+assert.deepEqual(exam.notExam, ['quixotic'])
+assert.deepEqual(exam.skippedBasic, ['the'])
+assert.equal(exam.examLevel, 'kaoyan')
+assert.ok(exam.message.includes('考研'), 'the scope line names the requested exam')
+const examLedger = loadLedger(examDir)
+assert.equal(examLedger.words.ubiquitous.source, 'article')
+assert.equal(examLedger.words.quixotic, undefined)
+const examDefault = freshEnv(join(root, 'exam-default'), { examLevel: 'gaokao' })
+const examGk = await examDefault.tools.get('vocab_import_article').execute(
+  { words: 'genuine' },
+  { agent: examDefault.agent },
+)
+assert.equal(examGk.examLevel, 'gaokao', 'the plugin examLevel is the fallback')
+assert.ok(examGk.message.includes('高考'))
+console.log('PASS exam scope: per-call exam level, :out words refused, configured examLevel as the default')
 
 rmSync(root, { recursive: true, force: true })
 console.log('\nALL CHECKS PASSED')

@@ -43,6 +43,9 @@ const DEFAULTS = {
   // A plain article image yields many candidates; cap how many words one
   // article import may add (basic everyday words are filtered out entirely).
   articleMaxWords: 20,
+  // Which exam's high-frequency words an article import should target:
+  // gaokao | cet4 | cet6 | kaoyan | any.
+  examLevel: 'cet4',
   ladderMinutes: [30, 180, 720, 2880, 10080, 43200], // 30m, 3h, 12h, 2d, 7d, 30d
   highMultiplier: 0.7,
   lowMultiplier: 1.6,
@@ -125,6 +128,7 @@ function resolveConfig(config) {
     retryDelayMinutes: clampNum(raw.retryDelayMinutes, 0.1, 1440, DEFAULTS.retryDelayMinutes),
     verifyAnswers: raw.verifyAnswers === false ? false : DEFAULTS.verifyAnswers,
     articleMaxWords: clampInt(raw.articleMaxWords, 1, 100, DEFAULTS.articleMaxWords),
+    examLevel: normalizeExamLevel(raw.examLevel, DEFAULTS.examLevel),
     ladderMinutes: ladder.length > 0 ? ladder : DEFAULTS.ladderMinutes.slice(),
     highMultiplier: clampNum(raw.highMultiplier, 0.1, 3, DEFAULTS.highMultiplier),
     lowMultiplier: clampNum(raw.lowMultiplier, 0.5, 5, DEFAULTS.lowMultiplier),
@@ -202,19 +206,36 @@ function splitWords(raw) {
   const words = []
   for (const item of list) {
     let text = String(item)
-    let freq = ''
-    const freqMatch = /[:=]\s*(high|normal|low)\s*$/i.exec(text)
-    if (freqMatch) {
-      freq = freqMatch[1].toLowerCase()
-      text = text.slice(0, freqMatch.index)
+    let flag = ''
+    const flagMatch = /[:=]\s*(high|normal|low|out|rare|skip|basic)\s*$/i.exec(text)
+    if (flagMatch) {
+      flag = flagMatch[1].toLowerCase()
+      text = text.slice(0, flagMatch.index)
     }
     const word = normalizeWord(text)
     if (!/^[a-z][a-z'-]*$/.test(word) || word.length > 40 || seen.has(word)) continue
     seen.add(word)
-    words.push({ word, freq })
+    const freq = flag === 'high' || flag === 'normal' || flag === 'low' ? flag : ''
+    words.push({ word, flag, freq })
   }
   return words
 }
+
+// Exam levels an article import can target. The model knows these word lists;
+// the plugin uses the level in messages and as a scope filter for :out words.
+const EXAM_LEVELS = {
+  gaokao: '高考',
+  cet4: 'CET-4',
+  cet6: 'CET-6',
+  kaoyan: '考研',
+  any: '考试',
+}
+
+function normalizeExamLevel(raw, fallback) {
+  const value = typeof raw === 'string' ? raw.trim().toLowerCase() : ''
+  return EXAM_LEVELS[value] ? value : fallback
+}
+
 
 function classifyFrequency(word, override) {
   if (override === 'high' || override === 'normal' || override === 'low') return override
@@ -1150,11 +1171,12 @@ export function apply(ctx, config) {
   // ── Image ingestion (the model reads the image; the plugin keeps words) ──
   // Two entry points share this:
   // - a worksheet image with underlined words (every word is wanted);
-  // - a plain article image (only the useful words, basic everyday words
-  //   filtered out and the batch capped, and the loop does NOT auto-start so
-  //   the user can see the picked list first).
+  // - a plain article image (only exam high-frequency words, :out and basic
+  //   words dropped, the batch capped, and the loop does NOT auto-start so the
+  //   user can see the picked list first).
   function importWords(raw, sessionId, options = {}) {
     const article = options.article === true
+    const examLevel = normalizeExamLevel(options.examLevel, cfg.examLevel)
     const parsed = splitWords(raw)
     if (parsed.length === 0) return { ok: false, error: 'no-words', words: [], queue: [] }
     const now = Date.now()
@@ -1166,9 +1188,15 @@ export function apply(ctx, config) {
       candidates.push(item)
     }
     const skippedBasic = []
+    const notExam = []
     const existingKeys = []
     const fresh = []
     for (const item of candidates) {
+      // The model may mark words it considered but rejected for scope reasons.
+      if (article && (item.flag === 'out' || item.flag === 'rare' || item.flag === 'skip' || item.flag === 'basic')) {
+        notExam.push(item.word)
+        continue
+      }
       if (article && HIGH_FREQUENCY.has(item.word)) {
         skippedBasic.push(item.word)
         continue
@@ -1210,9 +1238,11 @@ export function apply(ctx, config) {
     const keys = candidates.map((item) => item.word).filter((word) => included.has(word))
     const meta = {
       skippedBasic,
+      notExam,
       overLimit,
       existing: existingKeys,
       parsed: candidates.length,
+      examLevel,
     }
     if (typeof sessionId === 'string' && sessionId) state.activeSessionId = sessionId
     // Route the review to the selected conversation. When the words were
@@ -1261,8 +1291,8 @@ export function apply(ctx, config) {
   const IMPORT_SECTION = [
     '[Vocabulary review plugin]',
     'When the user uploads an English worksheet/word-list image WITH underlined words, read the image, extract every underlined English word (base form only), and call vocab_import once with the words comma-separated. Never repeat or store the image; the plugin keeps only the word list.',
-    'When the user uploads a plain article / reading-passage / news image with NO underlines, call vocab_import_article instead: pass the useful, exam-high-frequency base-form words from the text (append :high to words that repeat or are core vocabulary), never every word. The plugin filters basic words, caps the batch, and does not start the loop.',
-    'When the user pastes an article as text, extract its useful words the same way and call vocab_import_article; a plain word list still goes to vocab_import.',
+    'When the user uploads a plain article / reading-passage / news image with NO underlines, call vocab_import_article instead: pick the words in the text that are HIGH-FREQUENCY IN REAL EXAMS for the target level (default CET-4; 高考/四级/六级/考研 when the user says so — pass exam: gaokao|cet4|cet6|kaoyan). Do NOT pick a word merely because it repeats in this article, and never pass every word. Skip proper nouns and rare/literary words (or mark them :out), mark core high-frequency items :high. The plugin filters basic words, caps the batch, and does not start the loop.',
+    'When the user pastes an article as text, extract its exam-high-frequency words the same way and call vocab_import_article; a plain word list still goes to vocab_import.',
     'When the user asks to start/continue vocabulary review, call vocab_start instead of inventing words.',
   ].join('\n')
 
@@ -1293,7 +1323,7 @@ export function apply(ctx, config) {
   // QQ idle: the loop is not running, but this chat still speaks vocabulary.
   const QQ_IDLE_PROTOCOL = [
     '[Vocabulary review on QQ]',
-    'This QQ conversation can run the vocabulary review. When the user asks to start or continue reviewing, call vocab_start (never invent words). To stop, call vocab_stop; for a summary, call vocab_stats; when the user pastes or lists English words, call vocab_import with them; when the user pastes an article, call vocab_import_article with its useful words.',
+    'This QQ conversation can run the vocabulary review. When the user asks to start or continue reviewing, call vocab_start (never invent words). To stop, call vocab_stop; for a summary, call vocab_stats; when the user pastes or lists English words, call vocab_import with them; when the user pastes an article, call vocab_import_article with the exam-high-frequency words in it.',
   ].join('\n')
 
   function reviewActiveFor(agentId) {
@@ -1515,17 +1545,21 @@ export function apply(ctx, config) {
     () => ctx.tools.register({
       name: 'vocab_import_article',
       description:
-        'Add the useful / exam-high-frequency English words from a plain article or reading-passage image (NO underlines) to the vocabulary ledger. Read the image and pass comma-separated base-form words that a Chinese learner should memorise; append :high to words that repeat in the article or are core vocabulary. The plugin drops function/basic everyday words (the, is, good, school…), removes duplicates, caps the batch at articleMaxWords, and does NOT start a review loop — reply with the picked list briefly, then let the user press Start (or say 开始背单词). Never repeat or store the image.',
+        'Add the EXAM-HIGH-FREQUENCY words that occur in a plain article / reading-passage / news image (NO underlines) to the vocabulary ledger. Read the image and pass comma-separated base-form words that are high-frequency in the target exam (gaokao / CET-4 / CET-6 / kaoyan, default from the plugin config) — words a candidate is likely to meet again, NOT words that merely repeat in this article. Skip proper nouns, rare/literary words and basic everyday words; append :high to core high-frequency items and :out to words you considered but rejected as out of scope. The plugin also drops its built-in basic words, removes :out/rare words, deduplicates, caps the batch at articleMaxWords, and does NOT start a review loop — reply with the picked list briefly, then let the user press Start (or say 开始背单词). Never repeat or store the image.',
       parameters: {
         type: 'object',
         properties: {
           words: {
             type: 'string',
-            description: 'Comma-separated base-form words from the article, e.g. "abandon, benefit:high, cautious".',
+            description: 'Comma-separated base-form exam high-frequency words from the article, e.g. "abandon:cet4, benefit:high, quixotic:out".',
           },
           frequency: {
             type: 'string',
             description: 'Optional extra hints: "high", "low", "normal", or comma-separated word:high pairs.',
+          },
+          exam: {
+            type: 'string',
+            description: 'Target exam level: "gaokao" | "cet4" | "cet6" | "kaoyan" | "any". Defaults to the plugin examLevel (CET-4).',
           },
         },
         required: ['words'],
@@ -1534,7 +1568,8 @@ export function apply(ctx, config) {
       output: toolOutput,
       async execute(args, exec) {
         const raw = [args && args.words ? args.words : '', args && args.frequency ? args.frequency : ''].filter(Boolean).join(',')
-        const result = importWords(raw, sessionIdOfAgent(exec && exec.agent), { article: true })
+        const examLevel = normalizeExamLevel(args && args.exam, cfg.examLevel)
+        const result = importWords(raw, sessionIdOfAgent(exec && exec.agent), { article: true, examLevel })
         if (!result.ok) {
           return {
             ok: false,
@@ -1543,17 +1578,21 @@ export function apply(ctx, config) {
             queue: [],
           }
         }
-        const lines = []
+        const lines = [`Scope: high-frequency words for the ${EXAM_LEVELS[examLevel]} exam.`]
         if (result.added.length > 0) {
           lines.push(`Added ${result.added.length} article word(s) to the vocabulary ledger: ${result.added.join(', ')}.`)
         } else if (result.existing.length > 0) {
           lines.push('Those words are already in the vocabulary ledger; nothing new was added.')
         } else {
-          lines.push('Nothing worth adding: every candidate was a basic everyday word.')
+          lines.push('Nothing worth adding: the candidates were basic words or outside the exam scope.')
         }
         if (result.skippedBasic.length > 0) {
           const shown = result.skippedBasic.slice(0, 12).join(', ')
           lines.push(`Filtered out ${result.skippedBasic.length} basic word(s): ${shown}${result.skippedBasic.length > 12 ? '…' : ''}.`)
+        }
+        if (result.notExam.length > 0) {
+          const shown = result.notExam.slice(0, 12).join(', ')
+          lines.push(`Skipped ${result.notExam.length} word(s) you marked out of scope: ${shown}${result.notExam.length > 12 ? '…' : ''}.`)
         }
         if (result.overLimit.length > 0) {
           const shown = result.overLimit.slice(0, 8).join(', ')
@@ -1571,8 +1610,10 @@ export function apply(ctx, config) {
           words: result.words,
           added: result.added,
           skippedBasic: result.skippedBasic,
+          notExam: result.notExam,
           overLimit: result.overLimit,
           existing: result.existing,
+          examLevel,
           queue: result.queue,
         }
       },
@@ -2207,6 +2248,7 @@ export function apply(ctx, config) {
               .join(',')
             const result = importWords(raw, body && typeof body.sessionId === 'string' ? body.sessionId : undefined, {
               article: Boolean(body && body.mode === 'article'),
+              examLevel: normalizeExamLevel(body && body.exam, cfg.examLevel),
             })
             writeJson(res, 200, {
               ok: result.ok,

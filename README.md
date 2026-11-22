@@ -1,10 +1,10 @@
 # dsh-vocab-review
 
-**上传一张划线的单词表图片，插件就把它变成逐词抽查；没有划线的文章图片，它会自动挑出文章里的高频词加进词库。**
+**上传一张划线的单词表图片，插件就把它变成逐词抽查；没有划线的文章图片，它会挑出文章里的考试高频词（高考/CET-4/CET-6/考研）加进词库。**
 [中文文档](#中文文档) · [English docs](#english-docs)
 
 DeepSeek Harness（DSH）插件 · 无额外 npm 依赖 · 数据只在本机 · 可选 QQ 通道
-会 / 半会 / 不会三档判定 · 模型判对也会被插件复核 · 薄弱词本可导出 CSV · 文章图片自动收高频词
+会 / 半会 / 不会三档判定 · 模型判对也会被插件复核 · 薄弱词本可导出 CSV · 文章图片按考试高频收词
 
 ---
 
@@ -38,29 +38,31 @@ DeepSeek Harness（DSH）插件 · 无额外 npm 依赖 · 数据只在本机 ·
 >
 > **适用范围**：模型读图效果取决于图片清晰度；划线要能看清（直线划在词下最稳）。字迹模糊、双栏交错、整页密排时，识别可能漏词或多词，这时改用文字词表最稳。
 
-### 没有划线的文章图片：直接收文章高频词
+### 没有划线的文章图片：只收文章里的「考试高频词」
 
-试卷/单词表是「划线词全收」。普通文章、阅读理解、新闻截图**没有划线**，这时不该把整篇文章的词都塞进词库，而是挑**值得背的考试高频词**——这条路径由 `vocab_import_article` 负责：
+试卷/单词表是「划线词全收」。普通文章、阅读理解、新闻截图**没有划线**，这时不该把整篇文章的词都塞进词库，也不该按「这篇里出现得多」来挑——要挑的是**考试高频词**：在高考/CET-4/CET-6/考研真题里反复出现、值得背的考点词。这条路径由 `vocab_import_article` 负责：
 
 1. 在对话里上传文章图片（或直接把文章文字粘贴进来）。
-2. 模型读文章，挑出对中文学习者有用的**原形词**，可给反复出现的核心词标上 `:high`（间隔会更短），然后调用 `vocab_import_article`。
-3. 插件再做三道筛：
+2. 模型读文章，按**目标考试的词频**筛出里面的考试高频词（默认 CET-4，可在配置里改 `examLevel`；你说「考研/四级/六级/高考」时按你说的来），给核心高频词标 `:high`（间隔更短、问得更勤），把自己判断超纲/生僻的词标 `:out`，然后调用 `vocab_import_article`。
+3. 插件再做几道筛：
+   - **丢掉 `:out` 词**：模型标为超纲/生僻的词一律不进库；
    - **丢掉基础词**：`the / is / have / good / school` 这类内置基础词表里的词一律不收，免得词库被"小学词汇"灌满；
-   - **去重 + 只留原形**（模型给的形式会被规范化、去重）；
+   - **去重 + 只留原形**；
    - **限流**：每次最多收 `articleMaxWords`（默认 20）个，超出的词在工具返回里列出来。
-4. **不会自动开始考试**：插件先返回「收了哪几个、丢了哪几个基础词、哪几个因为超量没进」，模型回一两句话告诉你；你点 **开始复习** 或回「开始背单词」，才进入问答。
+4. **不会自动开始考试**：插件先返回「收了哪几个、丢了哪几个基础词、哪几个超纲、哪几个因为超量没进」，模型回一两句话告诉你；你点 **开始复习** 或回「开始背单词」，才进入问答。
 
 ```text
 你：[上传一篇没有划线的文章图片]
-模型：读文章 → vocab_import_article("abandon, benefit:high, cautious, ...")
-插件：丢基础词（the/is/school）+ 去重 + 最多 20 个 → 存入 ledger.json
-模型：从这篇里挑了 12 个词：abandon, benefit, cautious …（已跳过 the/is 等基础词）
+模型：读文章 → 按考试高频词筛 → vocab_import_article("abandon:cet4, benefit:high, quixotic:out, ...")
+插件：丢 :out 词 + 丢基础词（the/is/school）+ 去重 + 最多 20 个 → 存入 ledger.json
+模型：从这篇里挑了 12 个 CET-4 高频词：abandon, benefit, cautious …（abandon 是高频核心词）
 你：开始背单词
 插件：Q: abandon …
 ```
 
-> 两种图片的分工：**划线图 = 你选好了，插件照收**；**文章图 = 模型初选、插件按词频常识过滤、你确认后再背**。
-> 想让一篇文章多收点词就调大 `articleMaxWords`；文章里漏了你想要的基础词，直接把文字词表发给插件（走 `vocab_import`）补进去。
+> 选词标准是**考试词频**，不是「在这篇文章里重复几次」。文章里反复出现但考试不考的专有名词/生僻词，模型会用 `:out` 标掉，插件也会拒收。
+> 两种图片的分工：**划线图 = 你选好了，插件照收**；**文章图 = 模型按考试高频筛选、插件过滤基础词与超纲词、你确认后再背**。
+> 一篇文章想多收点词就调大 `articleMaxWords`；考试范围用 `examLevel`（见配置表），或每次导入时直接说「给我考研高频词」。
 
 ### 一分钟上手
 
@@ -73,7 +75,7 @@ dsh plugin --profile <profile> add github:at3623/dsh-vocab-review
 
 装好后：
 
-1. 在任意对话里**上传图片**：划线单词表 → 导入划线词；没有划线的文章 → 导入文章高频词。也可以直接粘贴文字词表。
+1. 在任意对话里**上传图片**：划线单词表 → 导入划线词；没有划线的文章 → 导入里面的考试高频词。也可以直接粘贴文字词表。
 2. 左侧栏点 **单词复习** 图标 → 选择「复习对话」→ 点 **开始复习**。
 3. 在对话里按提示回答中文释义；答完一个，插件自动问下一个。不确定就直说「好像…」，那是 `🤔` 档，会提前回来重问。
 4. 答错不要紧：错词进入错词池，按间隔阶梯自动回来重问；侧栏面板里能看到薄弱词本。
@@ -183,7 +185,7 @@ dsh plugin --profile <profile> add github:at3623/dsh-vocab-review
 | 工具 | 用途 |
 | --- | --- |
 | `vocab_import` | 导入划线单词（或文字词表），开始一轮复习，遵守限额 |
-| `vocab_import_article` | 从无划线的文章图片/文字里挑高频词入库：过滤基础词、按 `articleMaxWords` 限流、不自动开始 |
+| `vocab_import_article` | 从无划线文章图片/文字里挑**考试高频词**入库：拒收 `:out` 超纲词、过滤基础词、按 `articleMaxWords` 限流、不自动开始 |
 | `vocab_start` | 从保存的队列开始/继续（不重建已有队列） |
 | `vocab_stop` | 停止循环；保留词表与队列，不产生对话消息 |
 | `vocab_stats` | 到期/错词/队列/循环状态/计数的压缩摘要 |
@@ -233,6 +235,7 @@ dsh plugin --profile <profile> add github:at3623/dsh-vocab-review
 | `retryDelayMinutes` | `5` | 答错后多久重问 |
 | `verifyAnswers` | `true` | 插件用已存词义二次校验模型的 ✅，不符按错处理 |
 | `articleMaxWords` | `20` | 一次文章导入最多新增多少个词（1–100） |
+| `examLevel` | `cet4` | 文章导入的目标考试：`gaokao` / `cet4` / `cet6` / `kaoyan` / `any` |
 | `ladderMinutes` | `[30,180,720,2880,10080,43200]` | 间隔阶梯（分钟） |
 | `highMultiplier` / `lowMultiplier` | `0.7` / `1.6` | 高频词更勤 / 低频词更稀 |
 | `maxRecentErrors` | `5` | 面板最近错词条数 |
@@ -256,7 +259,7 @@ npm test          # 三个离线 harness
 npm run check     # 语法检查
 ```
 
-- `test/harness.mjs` —— 23 项：导入、✅/❌/🤔 记账、压缩注入、停止/继续、每日限额、面板改限额、每日提醒、跨天清零、重启持久化、QQ 通道、**自动续轮**、QQ 自动停下时推一条说明、**插件否决模型 ✅**、**模糊半档**、**🤔 后正常 ✅ 升档**、**薄弱词本 + 已掌握/重问/删除 + CSV 导出**、**ledger 版本守卫**、**「不知道」一律算错**、**短中文近义不被误判**、**文章图片导入（过滤基础词 + 限流 + 不自动开始）**、**文章导入的边界情况（全是基础词 / 已有词）**。
+- `test/harness.mjs` —— 24 项：导入、✅/❌/🤔 记账、压缩注入、停止/继续、每日限额、面板改限额、每日提醒、跨天清零、重启持久化、QQ 通道、**自动续轮**、QQ 自动停下时推一条说明、**插件否决模型 ✅**、**模糊半档**、**🤔 后正常 ✅ 升档**、**薄弱词本 + 已掌握/重问/删除 + CSV 导出**、**ledger 版本守卫**、**「不知道」一律算错**、**短中文近义不被误判**、**文章导入（过滤基础词 + 拒收 `:out` 超纲词 + 限流 + 不自动开始）**、**文章导入边界（全是基础词 / 已有词）**、**考试范围（单次指定考试、`:out` 拒收、`examLevel` 默认值）**。
 - `test/sessions-stop.mjs` —— 对话列表/选择持久化/路由、强暂停、归档回落。
 - `test/client-load-check.mjs` —— 用 mock loader 跑一遍 Client 半边，确认侧栏与面板注册。
 - `test/make_test_image.py` —— 重新生成 3 个划线词的测试图片。
@@ -268,7 +271,7 @@ npm run check     # 语法检查
 - `继续复习` 是一条可见的 user 消息，这是故意的——它是模型下一次回答的唤醒信号。
 - 浏览器通知需要你点过授权；侧栏红点与面板横幅不需要。
 - 二次校验是启发式的：同义但字面完全不同的答法可能被判错一次，`verifyAnswers: false` 可关掉。
-- 文章高频词由**模型挑选**，插件只负责过滤内置基础词、去重和数量上限；图片太糊时它会挑不出词，给更清晰的图或贴文字最稳。
+- 文章里的**考试高频词由模型按考纲词频挑选**；插件负责拒收 `:out` 超纲词、过滤内置基础词、去重和数量上限。若某个词你觉得该收却被过滤，直接发文字词表补进词库。图片太糊时它会挑不出词，给更清晰的图或贴文字最稳。
 
 ---
 
@@ -300,7 +303,7 @@ The bundle patch inserts the `vocab-review` row; the Client half is discovered f
 
 ## What it does
 
-1. **Image ingestion (the headline feature)** — the user uploads a worksheet image. The model reads it, extracts every **underlined English word** in base form, and calls `vocab_import` with a comma-separated list. The plugin normalizes the list, deduplicates it, and stores only the words; the image is never read or kept by the plugin. A typed word list works exactly the same way. A **plain article image with no underlines** takes the `vocab_import_article` path described below: the model picks the useful words, basic everyday words are dropped, the batch is capped, and the loop waits for the user.
+1. **Image ingestion (the headline feature)** — the user uploads a worksheet image. The model reads it, extracts every **underlined English word** in base form, and calls `vocab_import` with a comma-separated list. The plugin normalizes the list, deduplicates it, and stores only the words; the image is never read or kept by the plugin. A typed word list works exactly the same way. A **plain article image with no underlines** takes the `vocab_import_article` path described below: the model keeps only the **exam high-frequency** words, `:out`/basic words are refused, the batch is capped, and the loop waits for the user.
 2. **Q&A loop driven by the plugin** — each turn injects a compact queue:
 
    ```text
@@ -313,28 +316,29 @@ The bundle patch inserts the `vocab-review` row; the Client half is discovered f
 4. **Spaced repetition** — fixed ladder `30m → 3h → 12h → 2d → 7d → 30d` (simplified SM-2 / fixed ladder). A wrong answer resets the word to stage 0 and re-queues it after `retryDelayMinutes`. The queue builder pulls due reviews first, then due new words, injects a configurable number of previously-wrong words at random, then fills the rest with higher-frequency words (high-frequency weighted up, low-frequency down and scheduled with a longer multiplier).
 5. **Persistence** — `ledger.json` (words, queue, loop state, daily counters) and `settings.json` (limits + reminder bookkeeping) are written atomically (temp file + rename). Page reloads never touch Host state; a Host restart reloads the queue and keeps the loop **stopped** until Start is pressed.
 
-## Article images (high-frequency words)
+## Article images (exam high-frequency words)
 
-A worksheet has underlines, so every word is wanted. A normal article, reading comprehension text or news screenshot has none, and dumping every word into the ledger would bury it in trivia. That path is `vocab_import_article`:
+A worksheet has underlines, so every word is wanted. A normal article, reading comprehension text or news screenshot has none, and dumping every word into the ledger would bury it in trivia. The selection criterion here is **exam frequency — not how often a word repeats in the article**: the words worth adding are the ones that keep turning up in real 高考 / CET-4 / CET-6 / 考研 papers. That path is `vocab_import_article`:
 
 1. Upload the article image (or paste the article text).
-2. The model reads it, picks the base-form words a Chinese learner should memorise, may tag recurring/core words with `:high` (shorter interval), and calls `vocab_import_article`.
+2. The model reads it and keeps the words that are high-frequency **for the target exam** (default CET-4, set by `examLevel`; if the user asks for 考研/四级/六级/高考 the model passes `exam`). It tags core high-frequency items `:high` (shorter interval), tags out-of-scope or rare words `:out`, and calls `vocab_import_article`.
 3. The plugin filters that list:
+   - **refuses `:out` words** — anything the model marked as out of scope or rare never enters the ledger;
    - **drops basic everyday words** — anything in the built-in basic-word list (`the / is / have / good / school`…) is never added;
    - **deduplicates and normalizes** the forms the model returned;
    - **caps the batch** at `articleMaxWords` (default 20) and reports the words that did not fit.
-4. **It does not start the loop.** The tool result says which words were added, which basic words were filtered and which overflowed the cap; the model tells the user in one or two lines, and the review starts only when the user presses Start or says 「开始背单词」.
+4. **It does not start the loop.** The tool result names the scope (e.g. CET-4), the added words, the filtered basic words, the refused out-of-scope words and anything over the cap; the model tells the user in one or two lines, and the review starts only when the user presses Start or says 「开始背单词」.
 
 ```text
 You:   [upload a plain article image, no underlines]
-Model: reads it → vocab_import_article("abandon, benefit:high, cautious, ...")
-Plugin: drop basic words (the/is/school) + dedupe + cap 20 → ledger.json
-Model: picked 12 words from this passage: abandon, benefit, cautious … (skipped the/is)
+Model: reads it, keeps the exam high-frequency words → vocab_import_article("abandon:cet4, benefit:high, quixotic:out, ...")
+Plugin: refuse :out + drop basic words (the/is/school) + dedupe + cap 20 → ledger.json
+Model: picked 12 CET-4 high-frequency words: abandon, benefit, cautious … (abandon is a core high-frequency item)
 You:   开始背单词
 Plugin: Q: abandon …
 ```
 
-The division of labour: **underlined worksheet = the user chose, the plugin takes all**; **article = the model shortlists, the plugin filters by word-frequency common sense, the user confirms**. Raise `articleMaxWords` to take more per article; if a basic word really matters, add it through a typed word list (`vocab_import`).
+The division of labour: **underlined worksheet = the user chose, the plugin takes all**; **article = the model picks by exam-frequency, the plugin refuses out-of-scope and basic words, and the user confirms**. Raise `articleMaxWords` to take more per article; change `examLevel` (or say the exam in the request) to target a different syllabus; a basic word you still want can be added through a typed word list (`vocab_import`).
 
 ## Loop-level Stop / Start (req. 9)
 
@@ -420,7 +424,7 @@ The plugin registers a left-sidebar icon (`sidebar.panellist`, id `vocab-review`
 | Tool | Purpose |
 | --- | --- |
 | `vocab_import` | Import underlined words (or a typed list), start a session, respect quota. |
-| `vocab_import_article` | Pick high-frequency words from a plain article image/text: filter basic words, cap at `articleMaxWords`, never auto-start. |
+| `vocab_import_article` | Pick the **exam high-frequency** words from a plain article image/text: refuse `:out` words, filter basic words, cap at `articleMaxWords`, never auto-start. |
 | `vocab_start` | Start/Resume from the saved queue (does not rebuild a kept queue). |
 | `vocab_stop` | Stop the loop; keeps ledger + queue, no transcript message. |
 | `vocab_stats` | Compact due/wrong/queue/loop/counter summary. |
@@ -461,7 +465,7 @@ It is silent: no prompt, no `steer`, no fake transcript message. Afterwards the 
 ## Verification
 
 - `npm test` — runs the three offline harnesses below.
-- `node test/harness.mjs` — Host harness: 3-word import, ✅/❌ ledger updates, compact injection, loop Pause (no prompt, queue kept), Start resume without double-counting, `dailyTotalLimit=5`, live settings edits, once-per-day reminder, date rollover, reload persistence, the QQ channel (binding discovery, Start pushes `Q:` through `send_qq_message` without prompting the web session, QQ-graded answer recorded, next question pushed only after that turn ends), continuous review (with `queueSize: 2` the loop still asks all 5 due words, then goes `idle` with a `no-due` reason), the QQ idle note, **the plugin veto (a model `✅` with a different meaning is scheduled as wrong)**, **the fuzzy half-step**, **a fuzzy followed by a matching ✅ advancing the ladder**, **the weak-word book plus Known/Ask again/Remove and the CSV export**, **the ledger schema guard**, **"不知道" being wrong even when the model says `✅`**, **a short Chinese rewording not being vetoed**, **the article-image import (basic words filtered, batch capped, loop waiting for Start, protocol updated)**, and **the article edge cases (all-basic list, already-known words)**.
+- `node test/harness.mjs` — Host harness: 3-word import, ✅/❌ ledger updates, compact injection, loop Pause (no prompt, queue kept), Start resume without double-counting, `dailyTotalLimit=5`, live settings edits, once-per-day reminder, date rollover, reload persistence, the QQ channel (binding discovery, Start pushes `Q:` through `send_qq_message` without prompting the web session, QQ-graded answer recorded, next question pushed only after that turn ends), continuous review (with `queueSize: 2` the loop still asks all 5 due words, then goes `idle` with a `no-due` reason), the QQ idle note, **the plugin veto (a model `✅` with a different meaning is scheduled as wrong)**, **the fuzzy half-step**, **a fuzzy followed by a matching ✅ advancing the ladder**, **the weak-word book plus Known/Ask again/Remove and the CSV export**, **the ledger schema guard**, **"不知道" being wrong even when the model says `✅`**, **a short Chinese rewording not being vetoed**, **the article import (basic words filtered, `:out` refused, batch capped, loop waiting for Start, protocol updated)**, **the article edge cases (all-basic list, already-known words)**, and **the exam scope (per-call exam level, `:out` refusal, `examLevel` as the default)**.
 - `node test/sessions-stop.mjs` — conversation list (titles, archived/subagent excluded), selection persisted in `settings.json` + reload, Start routed to the selected session, strong-pause Stop (cancel + jobs/terminals/subagents, silent, `turnInFlight` false), idle Stop no-op, archived-selection fallback.
 - `node test/client-load-check.mjs` — evaluates the Client bundle with a mocked module loader and asserts the sidebar/main registrations.
 - `test/make_test_image.py` — regenerates the 3-underlined-word fixture (`pip install pillow`).
@@ -474,4 +478,4 @@ It is silent: no prompt, no `steer`, no fake transcript message. Afterwards the 
 - The continuation prompt (`继续复习`) is a visible user-role message by design — it is the wake-up for the next question.
 - Browser notifications require the user to grant permission; the sidebar badge and panel banner always work without it.
 - The plugin-side verification is a heuristic: a synonym that shares nothing with the stored gloss may be counted wrong once; `verifyAnswers: false` disables it.
-- Article high-frequency words are **chosen by the model**; the plugin only filters its basic-word list, deduplicates and caps the batch. A blurry image yields few words — a clearer photo or the pasted text works better.
+- The exam high-frequency words are **chosen by the model against the syllabus frequency**; the plugin refuses `:out` words, filters its basic-word list, deduplicates and caps the batch. If a word you wanted got filtered, add it through a typed word list. A blurry image yields few words — a clearer photo or the pasted text works better.

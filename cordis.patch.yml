@@ -12,8 +12,12 @@
 # trust the model's grading alone (the pre-1.4 behaviour).
 #
 # articleMaxWords: a plain article image (no underlines) goes through
-# vocab_import_article; the model picks the useful words, basic everyday words
-# are filtered out, and at most this many are added per import.
+# vocab_import_article; the model picks the exam high-frequency words, basic
+# everyday words are filtered out, and at most this many are added per import.
+#
+# examLevel: which exam's high-frequency vocabulary an article import targets —
+# gaokao | cet4 | cet6 | kaoyan | any (default CET-4). The user can override it
+# per import by naming the exam (高考/四级/六级/考研).
 - insert:
     - id: vocab-review
       name: dsh-vocab-review
@@ -24,6 +28,7 @@
         retryDelayMinutes: 5
         verifyAnswers: true
         articleMaxWords: 20
+        examLevel: cet4
         ladderMinutes: [30, 180, 720, 2880, 10080, 43200]
         highMultiplier: 0.7
         lowMultiplier: 1.6
