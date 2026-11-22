@@ -2592,7 +2592,17 @@ export function apply(ctx, config) {
       kind: 'prefix',
       path: API_PREFIX,
       handler: async (req, res) => {
-        if (!trusted(req)) {
+        // DSH's own trust fence: Origin/Host checks plus browser authentication
+        // for routes mounted outside the shared `/api` channel. Falls back to the
+        // local Origin check only when the connection service is not mounted.
+        const connection = ctx.get('connection')
+        const rejection =
+          connection && typeof connection.requestRejection === 'function' ? connection.requestRejection(req) : undefined
+        if (rejection !== undefined) {
+          writeJson(res, rejection, { ok: false, error: { code: 'forbidden', message: 'forbidden' } })
+          return
+        }
+        if (!connection && !trusted(req)) {
           writeJson(res, 403, { ok: false, error: { code: 'forbidden', message: 'forbidden' } })
           return
         }

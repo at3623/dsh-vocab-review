@@ -112,6 +112,9 @@ function makeCtx(sessionId = 'session-test', options = {}) {
     workspaceRegistry: {
       archivedSessionIds: archived,
     },
+    // Optional in tests: the Host's connection trust fence. When omitted the
+    // plugin falls back to its local Origin check.
+    connection: options.connection,
     jobs: {
       list: (caller) => {
         actionLog.push(['jobs.list', caller])
@@ -192,7 +195,7 @@ function fireUser(env, text, session = { id: 'session-test' }) {
 
 const settle = () => new Promise((resolve) => setTimeout(resolve, 20))
 
-function callRoute(env, method, path, body) {
+function callRoute(env, method, path, body, headers = {}) {
   const route = env.routes.find((candidate) => candidate.path === '/api/dsh-vocab-review')
   assert.ok(route, 'API route is registered')
   return new Promise((resolve, reject) => {
@@ -200,7 +203,7 @@ function callRoute(env, method, path, body) {
     const req = {
       method,
       url: path,
-      headers: {},
+      headers: { ...headers },
       async *[Symbol.asyncIterator]() {
         for (const chunk of chunks) yield chunk
       },
@@ -963,6 +966,25 @@ const extrasOffLedger = loadLedger(extrasOffDir)
 assert.equal(extrasOffLedger.words.abandon, undefined)
 assert.equal(extrasOffLedger.words.benefit, undefined)
 console.log('PASS extras config: includeHighFreq=false imports only the underlined words')
+
+// ── 32. Host connection trust fence guards the HTTP routes ────────────────
+const guardDir = join(root, 'guard')
+const guardEnv = freshEnv(
+  guardDir,
+  {},
+  {
+    connection: {
+      requestRejection: (request) => (request.headers['x-untrusted'] === '1' ? 403 : undefined),
+    },
+  },
+)
+const rejected = await callRoute(guardEnv, 'GET', '/api/dsh-vocab-review/state', undefined, { 'x-untrusted': '1' })
+assert.equal(rejected.status, 403, 'a request the connection rejects gets the rejection status')
+assert.equal(rejected.body.ok, false)
+const allowed = await callRoute(guardEnv, 'GET', '/api/dsh-vocab-review/state')
+assert.equal(allowed.status, 200, 'a trusted request still works')
+assert.equal(allowed.body.ok, true)
+console.log('PASS access check: routes honour the connection trust fence and pass trusted requests')
 
 rmSync(root, { recursive: true, force: true })
 console.log('\nALL CHECKS PASSED')
