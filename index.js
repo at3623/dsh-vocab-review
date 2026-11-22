@@ -46,6 +46,9 @@ const DEFAULTS = {
   // A plain article image yields many candidates; cap how many words one
   // article import may add (basic everyday words are filtered out entirely).
   articleMaxWords: 20,
+  // A worksheet image may also contain exam high-frequency words that are not
+  // underlined; keep them when the model reports them as `extra`.
+  includeHighFreq: true,
   // Which exam's high-frequency words an article import should target:
   // gaokao | cet4 | cet6 | kaoyan | any.
   examLevel: 'cet4',
@@ -140,6 +143,7 @@ function resolveConfig(config) {
     retryDelayMinutes: clampNum(raw.retryDelayMinutes, 0.1, 1440, DEFAULTS.retryDelayMinutes),
     verifyAnswers: raw.verifyAnswers === false ? false : DEFAULTS.verifyAnswers,
     articleMaxWords: clampInt(raw.articleMaxWords, 1, 100, DEFAULTS.articleMaxWords),
+    includeHighFreq: raw.includeHighFreq === false ? false : DEFAULTS.includeHighFreq,
     examLevel: normalizeExamLevel(raw.examLevel, DEFAULTS.examLevel),
     ladderMinutes: ladder.length > 0 ? ladder : DEFAULTS.ladderMinutes.slice(),
     highMultiplier: clampNum(raw.highMultiplier, 0.1, 3, DEFAULTS.highMultiplier),
@@ -397,7 +401,7 @@ export function apply(ctx, config) {
       correct: Number.isFinite(value.correct) ? value.correct : 0,
       errors: Number.isFinite(value.errors) ? value.errors : 0,
       fuzzy: Number.isFinite(value.fuzzy) ? value.fuzzy : 0,
-      source: value.source === 'article' ? 'article' : 'list',
+      source: value.source === 'article' ? 'article' : value.source === 'exam' ? 'exam' : 'list',
     }
   }
 
@@ -494,6 +498,7 @@ export function apply(ctx, config) {
             at: Number.isFinite(parsed.lastImport.at) ? parsed.lastImport.at : Date.now(),
             parsed: Number.isFinite(parsed.lastImport.parsed) ? parsed.lastImport.parsed : 0,
             added: Number.isFinite(parsed.lastImport.added) ? parsed.lastImport.added : 0,
+            extra: Number.isFinite(parsed.lastImport.extra) ? parsed.lastImport.extra : 0,
             skippedBasic: Number.isFinite(parsed.lastImport.skippedBasic) ? parsed.lastImport.skippedBasic : 0,
             notExam: Number.isFinite(parsed.lastImport.notExam) ? parsed.lastImport.notExam : 0,
             overLimit: Number.isFinite(parsed.lastImport.overLimit) ? parsed.lastImport.overLimit : 0,
@@ -1489,6 +1494,11 @@ export function apply(ctx, config) {
     // QQ with 「开始背单词」 instead of being quizzed in the web chat.
     const fromQqImage = Date.now() < qqImageImportUntil
     if (fromQqImage) qqImageImportUntil = 0
+    // Extra exam high-frequency words seen in the same worksheet image. The
+    // model passes them as `extra`; the underlined list stays the main queue.
+    const extrasRaw = typeof options.extras === 'string' ? options.extras : ''
+    const includeExtras = !article && cfg.includeHighFreq && extrasRaw.trim() !== ''
+    const extrasList = includeExtras ? splitWords(extrasRaw) : []
     const parsed = splitWords(raw)
     if (parsed.length === 0) return { ok: false, error: 'no-words', words: [], queue: [] }
     const now = Date.now()
@@ -1548,7 +1558,62 @@ export function apply(ctx, config) {
       }
     }
     const included = new Set([...existingKeys, ...accepted.map((item) => item.word)])
-    const keys = candidates.map((item) => item.word).filter((word) => included.has(word))
+    const baseKeys = candidates.map((item) => item.word).filter((word) => included.has(word))
+    // ── Exam high-frequency extras from the same worksheet image ────────────
+    const extraSkipped = []
+    const extraNotExam = []
+    const extraExisting = []
+    const extraOverLimit = []
+    const extraAccepted = []
+    if (includeExtras) {
+      const seenWords = new Set([...candidates.map((item) => item.word), ...accepted.map((item) => item.word), ...existingKeys])
+      for (const item of extrasList) {
+        if (seenWords.has(item.word)) continue
+        seenWords.add(item.word)
+        if (item.flag === 'out' || item.flag === 'rare' || item.flag === 'skip' || item.flag === 'basic') {
+          extraNotExam.push(item.word)
+          continue
+        }
+        if (HIGH_FREQUENCY.has(item.word)) {
+          extraSkipped.push(item.word)
+          continue
+        }
+        const existing = state.words[item.word]
+        if (existing) {
+          existing.freq = classifyFrequency(item.word, item.freq || existing.freq)
+          extraExisting.push(item.word)
+          continue
+        }
+        extraAccepted.push(item)
+      }
+      const cap = cfg.articleMaxWords
+      for (const item of extraAccepted.splice(cap)) extraOverLimit.push(item.word)
+      for (const item of extraAccepted) {
+        state.words[item.word] = {
+          word: item.word,
+          display: item.word,
+          meaning: '',
+          meanings: [],
+          freq: classifyFrequency(item.word, item.freq),
+          stage: 0,
+          ease: 1,
+          dueAt: now,
+          createdAt: now,
+          lastAskedAt: null,
+          lastResultAt: null,
+          lastErrorAt: null,
+          lastFuzzyAt: null,
+          correct: 0,
+          errors: 0,
+          fuzzy: 0,
+          source: 'exam',
+        }
+      }
+    }
+    const extraIncluded = new Set([...extraExisting, ...extraAccepted.map((item) => item.word)])
+    const extraKeys = extrasList.map((item) => item.word).filter((word) => extraIncluded.has(word))
+    // Underlined words first, then the exam high-frequency extras.
+    const keys = [...baseKeys, ...extraKeys.filter((word) => !baseKeys.includes(word))]
     const meta = {
       skippedBasic,
       notExam,
@@ -1557,6 +1622,12 @@ export function apply(ctx, config) {
       parsed: candidates.length,
       examLevel,
       qqPending: fromQqImage,
+      extras: extraAccepted.map((item) => item.word),
+      extraSkipped,
+      extraNotExam,
+      extraOverLimit,
+      extraExisting,
+      includeHighFreq: cfg.includeHighFreq,
     }
     // Remember what the last import looked like so the panel can warn when an
     // image probably lost words ("可能是识别不完整").
@@ -1565,12 +1636,13 @@ export function apply(ctx, config) {
       at: now,
       parsed: candidates.length,
       added: accepted.length,
+      extra: extraAccepted.length,
       skippedBasic: skippedBasic.length,
       notExam: notExam.length,
       overLimit: overLimit.length,
     }
     ctx.logger?.info?.(
-      `${PLUGIN}: [import] mode=${article ? 'article' : 'list'} parsed=${candidates.length} added=${accepted.length} basic=${skippedBasic.length} out=${notExam.length} capped=${overLimit.length}`,
+      `${PLUGIN}: [import] mode=${article ? 'article' : 'list'} parsed=${candidates.length} added=${accepted.length} extras=${extraAccepted.length} basic=${skippedBasic.length} out=${notExam.length} capped=${overLimit.length}`,
     )
     if (typeof sessionId === 'string' && sessionId) state.activeSessionId = sessionId
     // Route the review to the selected conversation. When the words were
@@ -1619,7 +1691,7 @@ export function apply(ctx, config) {
   // ── Per-agent prompt injection ───────────────────────────────────────────
   const IMPORT_SECTION = [
     '[Vocabulary review plugin]',
-    'When the user uploads an English worksheet/word-list image WITH underlined words, read the image, extract every underlined English word (base form only), and call vocab_import once with the words comma-separated. Never repeat or store the image; the plugin keeps only the word list.',
+    'When the user uploads an English worksheet/word-list image WITH underlined words, read the image, extract every underlined English word (base form only), and call vocab_import once with the words comma-separated. When the same image also contains exam high-frequency words that are not underlined, pass them in the same call as `extra` (base form, comma-separated; `:out` for words outside the target exam) — never invent words that are not in the image. Never repeat or store the image; the plugin keeps only the word list.',
     'When the user uploads a plain article / reading-passage / news image with NO underlines, call vocab_import_article instead: pick the words in the text that are HIGH-FREQUENCY IN REAL EXAMS for the target level (default CET-4; 高考/四级/六级/考研 when the user says so — pass exam: gaokao|cet4|cet6|kaoyan). Do NOT pick a word merely because it repeats in this article, and never pass every word. Skip proper nouns and rare/literary words (or mark them :out), mark core high-frequency items :high. The plugin filters basic words, caps the batch, and does not start the loop.',
     'When the user pastes an article as text, extract its exam-high-frequency words the same way and call vocab_import_article; a plain word list still goes to vocab_import.',
     'When the user asks to start/continue vocabulary review, call vocab_start instead of inventing words.',
@@ -1815,7 +1887,7 @@ export function apply(ctx, config) {
     () => ctx.tools.register({
       name: 'vocab_import',
       description:
-        'Import the underlined English words from the worksheet image the user just uploaded, or a word list they typed. Pass base-form words only, comma-separated. The plugin stores only the clean word list, never the image. Starts a review session and returns the queue (or the daily-quota stop message).',
+        'Import the underlined English words from the worksheet image the user just uploaded, or a word list they typed. Pass base-form words only, comma-separated. When the same image also contains exam high-frequency words that are not underlined, pass them in the optional `extra` field (base form; append :out to words outside the target exam). The plugin stores only the clean word list, never the image. Starts a review session and returns the queue (or the daily-quota stop message).',
       parameters: {
         type: 'object',
         properties: {
@@ -1827,6 +1899,10 @@ export function apply(ctx, config) {
             type: 'string',
             description: 'Optional frequency hints: "high", "low", "normal", or comma-separated word:high pairs.',
           },
+          extra: {
+            type: 'string',
+            description: 'Optional: exam high-frequency words visible in the same worksheet image but not underlined (base form, comma-separated; :out for words outside the target exam). Basic words and duplicates are filtered by the plugin.',
+          },
         },
         required: ['words'],
         additionalProperties: false,
@@ -1834,7 +1910,13 @@ export function apply(ctx, config) {
       output: toolOutput,
       async execute(args, exec) {
         const raw = [args && args.words ? args.words : '', args && args.frequency ? args.frequency : ''].filter(Boolean).join(',')
-        const result = importWords(raw, sessionIdOfAgent(exec && exec.agent))
+        const result = importWords(raw, sessionIdOfAgent(exec && exec.agent), {
+          extras: args && typeof args.extra === 'string' ? args.extra : '',
+        })
+        const extraNote =
+          result.extras && result.extras.length > 0
+            ? ` Also added ${result.extras.length} exam high-frequency word(s) from the same image: ${result.extras.join(', ')}.`
+            : ''
         if (!result.ok) {
           return { ok: false, message: 'No valid English words were found. Ask the user for a clearer worksheet image.', words: [], queue: [] }
         }
@@ -1842,8 +1924,9 @@ export function apply(ctx, config) {
           return {
             ok: true,
             qqPending: true,
-            message: `Imported ${result.words.length} word(s) from the QQ image; the review is NOT started. Do NOT output any Q: line. Reply with one short line and tell the user to send 「开始背单词」 in QQ when they are ready. QUEUE: ${result.queue.join(', ') || '(empty)'}`,
+            message: `Imported ${result.words.length} word(s) from the QQ image; the review is NOT started.${extraNote} Do NOT output any Q: line. Reply with one short line and tell the user to send 「开始背单词」 in QQ when they are ready. QUEUE: ${result.queue.join(', ') || '(empty)'}`,
             words: result.words,
+            extras: result.extras,
             queue: result.queue,
           }
         }
@@ -1851,8 +1934,9 @@ export function apply(ctx, config) {
           return {
             ok: true,
             blocked: true,
-            message: `${result.quota && result.quota.message ? result.quota.message : '今日已达上限'}. Imported ${result.words.length} words; the queue is kept for the next review day.`,
+            message: `${result.quota && result.quota.message ? result.quota.message : '今日已达上限'}. Imported ${result.words.length} words.${extraNote} The queue is kept for the next review day.`,
             words: result.words,
+            extras: result.extras,
             queue: result.queue,
           }
         }
@@ -1860,15 +1944,17 @@ export function apply(ctx, config) {
           return {
             ok: true,
             deferred: true,
-            message: `Imported ${result.words.length} words. The review routes to the selected conversation; open the Vocabulary review panel and press Start (or call vocab_start there) to ask the first question.`,
+            message: `Imported ${result.words.length} words.${extraNote} The review routes to the selected conversation; open the Vocabulary review panel and press Start (or call vocab_start there) to ask the first question.`,
             words: result.words,
+            extras: result.extras,
             queue: result.queue,
           }
         }
         return {
           ok: true,
-          message: `Imported ${result.words.length} words. QUEUE: ${result.queue.join(', ')}. Ask only the first word now: Q: ${result.first}`,
+          message: `Imported ${result.words.length} words.${extraNote} QUEUE: ${result.queue.join(', ')}. Ask only the first word now: Q: ${result.first}`,
           words: result.words,
+          extras: result.extras,
           queue: result.queue,
         }
       },

@@ -96,6 +96,7 @@ window.__ModuleLoader__.load({
       diagExam: 'Article exam scope',
       diagVerify: 'Plugin verify',
       lastImportLabel: 'Last import',
+      extraWordLabel: 'exam high-freq',
       importIncomplete: 'This import looks short — the image may have lost words; a typed word list is safer.',
       skippedBasicLabel: 'basic',
       skippedOutLabel: 'out of scope',
@@ -193,6 +194,7 @@ window.__ModuleLoader__.load({
       diagExam: '文章考试范围',
       diagVerify: '插件复核',
       lastImportLabel: '上次导入',
+      extraWordLabel: '高频词',
       importIncomplete: '本次导入偏少，图片可能漏词，改用文字词表更稳。',
       skippedBasicLabel: '基础词',
       skippedOutLabel: '超纲',
@@ -988,6 +990,7 @@ window.__ModuleLoader__.load({
                       'div',
                       { className: lastImport.parsed < 3 ? 'vr-error' : 'vr-hint' },
                       `${t('lastImportLabel')}: ${lastImport.mode === 'article' ? 'article' : 'list'} · ${lastImport.parsed} → ${lastImport.added}` +
+                        `${lastImport.extra ? ` · +${lastImport.extra} ${t('extraWordLabel')}` : ''}` +
                         `${lastImport.skippedBasic ? ` · −${lastImport.skippedBasic} ${t('skippedBasicLabel')}` : ''}` +
                         `${lastImport.notExam ? ` · −${lastImport.notExam} ${t('skippedOutLabel')}` : ''}` +
                         `${lastImport.parsed < 3 ? ` · ${t('importIncomplete')}` : ''}`,

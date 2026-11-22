@@ -15,6 +15,11 @@
 # vocab_import_article; the model picks the exam high-frequency words, basic
 # everyday words are filtered out, and at most this many are added per import.
 #
+# includeHighFreq: a worksheet image with underlines may also contain exam
+# high-frequency words that are not underlined. When true (default) the model
+# passes them as `extra` and they are added to the ledger too (same filtering +
+# the articleMaxWords cap). Set false to import underlined words only.
+#
 # examLevel: which exam's high-frequency vocabulary an article import targets —
 # gaokao | cet4 | cet6 | kaoyan | any (default CET-4). The user can override it
 # per import by naming the exam (高考/四级/六级/考研).
@@ -39,6 +44,7 @@
         retryDelayMinutes: 5
         verifyAnswers: true
         articleMaxWords: 20
+        includeHighFreq: true
         examLevel: cet4
         qqApiBase: https://api.sgroup.qq.com
         ladderMinutes: [30, 180, 720, 2880, 10080, 43200]

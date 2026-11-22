@@ -928,5 +928,41 @@ assert.ok(perfSaveMs < 300, `1500-word save takes ${perfSaveMs}ms (< 300ms)`)
 assert.ok((await state(perfEnv)).diag.ledgerBytes > 100_000)
 console.log(`PASS performance: 1500 words load=${Math.round(perfLoadMs)}ms save=${perfSaveMs}ms`)
 
+// ── 30. Underlined worksheet also imports exam high-frequency extras ─────
+const extrasDir = join(root, 'worksheet-extras')
+const extrasEnv = freshEnv(extrasDir, { articleMaxWords: 2 })
+const extrasImport = await extrasEnv.tools.get('vocab_import').execute(
+  { words: 'alpha, beta', extra: 'abandon, the, alpha, quixotic:out, genuine:high, cautious, promote' },
+  { agent: extrasEnv.agent },
+)
+assert.equal(extrasImport.ok, true)
+assert.deepEqual(extrasImport.extras, ['abandon', 'genuine'], 'basic, duplicate, :out and over-cap extras are filtered')
+assert.ok(extrasImport.message.includes('Also added 2 exam high-frequency word(s)'))
+assert.deepEqual(extrasImport.queue.slice(0, 4), ['alpha', 'beta', 'abandon', 'genuine'], 'underlined words come first')
+const extrasLedger = loadLedger(extrasDir)
+assert.equal(extrasLedger.words.abandon.source, 'exam', 'extras are marked as exam words')
+assert.equal(extrasLedger.words.genuine.freq, 'high', 'a :high hint on an extra is kept')
+assert.equal(extrasLedger.words.the, undefined, 'basic words are never added as extras')
+assert.equal(extrasLedger.words.quixotic, undefined, ':out extras are refused')
+assert.equal(extrasLedger.words.cautious, undefined, 'extras respect the articleMaxWords cap')
+const extrasState = await state(extrasEnv)
+assert.equal(extrasState.lastImport.extra, 2)
+console.log('PASS extras: a worksheet import also takes exam high-frequency words (filtered + capped)')
+
+// ── 31. includeHighFreq:false keeps the old underlined-only behaviour ────
+const extrasOffDir = join(root, 'worksheet-extras-off')
+const extrasOffEnv = freshEnv(extrasOffDir, { includeHighFreq: false })
+const extrasOff = await extrasOffEnv.tools.get('vocab_import').execute(
+  { words: 'alpha', extra: 'abandon, benefit' },
+  { agent: extrasOffEnv.agent },
+)
+assert.equal(extrasOff.ok, true)
+assert.deepEqual(extrasOff.extras, [])
+assert.equal(extrasOff.message.includes('Also added'), false)
+const extrasOffLedger = loadLedger(extrasOffDir)
+assert.equal(extrasOffLedger.words.abandon, undefined)
+assert.equal(extrasOffLedger.words.benefit, undefined)
+console.log('PASS extras config: includeHighFreq=false imports only the underlined words')
+
 rmSync(root, { recursive: true, force: true })
 console.log('\nALL CHECKS PASSED')

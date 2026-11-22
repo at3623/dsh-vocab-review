@@ -15,7 +15,7 @@ DeepSeek Harness（DSH）插件 · 零运行时依赖 · 数据只在本机 · �
 这是这个插件最省事的地方：**你只需要上传图片，不用整理词表、不用抄单词、不用管错词本。**
 
 1. 在对话里直接上传一张单词表 / 试卷 / 作业 / 阅读材料的图片。
-2. 聊天模型读图，只挑出**划线的英文单词**，并统一还原成原形（`ran → run`、`benefits → benefit`、`studies → study`），去重后调用 `vocab_import`。
+2. 聊天模型读图，只挑出**划线的英文单词**，并统一还原成原形（`ran → run`、`benefits → benefit`、`studies → study`），去重后调用 `vocab_import`。**同一张图里出现的考试高频词（没划线的）也会一起收**：模型把它们放在同一个调用的 `extra` 字段里，插件照样过滤基础词、拒收 `:out` 超纲词、去重并按 `articleMaxWords` 限量，词条来源记为 `exam`；不想要这个行为就设 `includeHighFreq: false`。
 3. 插件收到纯文本词表后：规范化 → 去重 → 标出高频/普通/低频 → 写进本地 `ledger.json`，并立刻出第一题。
 4. **图片不会被插件读取、保存或上传**：插件没有 OCR、没有图片处理依赖，落盘的只有文字词表。
 
@@ -208,7 +208,7 @@ dsh plugin --profile <profile> add github:at3623/dsh-vocab-review
 
 | 工具 | 用途 |
 | --- | --- |
-| `vocab_import` | 导入划线单词（或文字词表），开始一轮复习，遵守限额 |
+| `vocab_import` | 导入划线单词（或文字词表），**同时可带 `extra` 里的考试高频词**；开始一轮复习，遵守限额 |
 | `vocab_import_article` | 从无划线文章图片/文字里挑**考试高频词**入库：拒收 `:out` 超纲词、过滤基础词、按 `articleMaxWords` 限流、不自动开始 |
 | `vocab_start` | 从保存的队列开始/继续（不重建已有队列） |
 | `vocab_stop` | 停止循环；保留词表与队列，不产生对话消息 |
@@ -274,7 +274,8 @@ dsh plugin --profile <profile> add github:at3623/dsh-vocab-review
 | `wrongInject` | `2` | 每轮随机插入的错词数 |
 | `retryDelayMinutes` | `5` | 答错后多久重问 |
 | `verifyAnswers` | `true` | 插件用已存词义二次校验模型的 ✅，不符按错处理 |
-| `articleMaxWords` | `20` | 一次文章导入最多新增多少个词（1–100） |
+| `articleMaxWords` | `20` | 一次文章导入最多新增多少个词（1–100）；划线图的 `extra` 高频词也用它限量 |
+| `includeHighFreq` | `true` | 划线图里没划线的考试高频词也一起入库；`false` = 只收划线词 |
 | `examLevel` | `cet4` | 文章导入的目标考试：`gaokao` / `cet4` / `cet6` / `kaoyan` / `any` |
 | `ladderMinutes` | `[30,180,720,2880,10080,43200]` | 间隔阶梯（分钟） |
 | `highMultiplier` / `lowMultiplier` | `0.7` / `1.6` | 高频词更勤 / 低频词更稀 |
@@ -307,7 +308,7 @@ npm test          # 4 个离线 harness
 npm run check     # 语法检查
 ```
 
-- `test/harness.mjs` —— 29 项：导入、✅/❌/🤔 记账、压缩注入、停止/继续、每日限额、面板改限额、每日提醒、跨天清零、重启持久化、QQ 通道、**自动续轮**、QQ 自动停下时推一条说明、**插件否决模型 ✅**、**模糊半档**、**🤔 后正常 ✅ 升档**、**薄弱词本 + 已掌握/重问/删除 + CSV 导出**、**ledger 版本守卫**、**「不知道」一律算错**、**短中文近义半会并记入词义池**、**文章导入（过滤基础词 + 拒收 `:out` 超纲词 + 限流 + 不自动开始）**、**文章导入边界（全是基础词 / 已有词）**、**考试范围（单次指定考试、`:out` 拒收、`examLevel` 默认值）**、**难度因子 ease**、**CSV/JSON/Anki 三种导出**、**每日历史**、**诊断字段与上次导入**、**1500 词性能**。
+- `test/harness.mjs` —— 31 项：导入、✅/❌/🤔 记账、压缩注入、停止/继续、每日限额、面板改限额、每日提醒、跨天清零、重启持久化、QQ 通道、**自动续轮**、QQ 自动停下时推一条说明、**插件否决模型 ✅**、**模糊半档**、**🤔 后正常 ✅ 升档**、**薄弱词本 + 已掌握/重问/删除 + CSV 导出**、**ledger 版本守卫**、**「不知道」一律算错**、**短中文近义半会并记入词义池**、**文章导入（过滤基础词 + 拒收 `:out` 超纲词 + 限流 + 不自动开始）**、**文章导入边界（全是基础词 / 已有词）**、**考试范围（单次指定考试、`:out` 拒收、`examLevel` 默认值）**、**难度因子 ease**、**CSV/JSON/Anki 三种导出**、**每日历史**、**诊断字段与上次导入**、**1500 词性能**、**划线图附带 `extra` 高频词（过滤 + 限量 + 来源标记）**、**`includeHighFreq:false` 只收划线词**。
 - `test/qq-builtin.mjs` —— 内置 QQ 的离线联调（假网关 + 假 HTTP）：token→gateway→identify、心跳、入境文字→会话提示→回传、入境图片→图片块、命令「开始背单词」直接推题、答题批改后推下一题、消息去重、断线/禁用状态。
 - `test/sessions-stop.mjs` —— 对话列表/选择持久化/路由、强暂停、归档回落。
 - `test/client-load-check.mjs` —— 用 mock loader 跑一遍 Client 半边，确认侧栏与面板注册。
@@ -368,7 +369,7 @@ The third-party `@hualiong/dsh-qq-bot` plugin is only an **alternative transport
 
 ## What it does
 
-1. **Image ingestion (the headline feature)** — the user uploads a worksheet image. The model reads it, extracts every **underlined English word** in base form, and calls `vocab_import` with a comma-separated list. The plugin normalizes the list, deduplicates it, and stores only the words; the image is never read or kept by the plugin. A typed word list works exactly the same way. A **plain article image with no underlines** takes the `vocab_import_article` path described below: the model keeps only the **exam high-frequency** words, `:out`/basic words are refused, the batch is capped, and the loop waits for the user.
+1. **Image ingestion (the headline feature)** — the user uploads a worksheet image. The model reads it, extracts every **underlined English word** in base form, and calls `vocab_import` with a comma-separated list. **Exam high-frequency words that appear in the same image without an underline are added too**: the model passes them in the same call's `extra` field, and the plugin filters basic words, refuses `:out` words, deduplicates and caps them at `articleMaxWords` (source `exam`); set `includeHighFreq: false` to import underlined words only. The plugin normalizes the list, deduplicates it, and stores only the words; the image is never read or kept by the plugin. A typed word list works exactly the same way. A **plain article image with no underlines** takes the `vocab_import_article` path described below: the model keeps only the **exam high-frequency** words, `:out`/basic words are refused, the batch is capped, and the loop waits for the user.
 2. **Q&A loop driven by the plugin** — each turn injects a compact queue:
 
    ```text
@@ -494,7 +495,7 @@ The plugin registers a left-sidebar icon (`sidebar.panellist`, id `vocab-review`
 
 | Tool | Purpose |
 | --- | --- |
-| `vocab_import` | Import underlined words (or a typed list), start a session, respect quota. |
+| `vocab_import` | Import underlined words (or a typed list) plus optional exam high-frequency `extra` words from the same image, start a session, respect quota. |
 | `vocab_import_article` | Pick the **exam high-frequency** words from a plain article image/text: refuse `:out` words, filter basic words, cap at `articleMaxWords`, never auto-start. |
 | `vocab_start` | Start/Resume from the saved queue (does not rebuild a kept queue). |
 | `vocab_stop` | Stop the loop; keeps ledger + queue, no transcript message. |
@@ -553,7 +554,7 @@ It is silent: no prompt, no `steer`, no fake transcript message. Afterwards the 
 ## Verification
 
 - `npm test` — runs the three offline harnesses below.
-- `node test/harness.mjs` — Host harness: 3-word import, ✅/❌ ledger updates, compact injection, loop Pause (no prompt, queue kept), Start resume without double-counting, `dailyTotalLimit=5`, live settings edits, once-per-day reminder, date rollover, reload persistence, the QQ channel (binding discovery, Start pushes `Q:` through `send_qq_message` without prompting the web session, QQ-graded answer recorded, next question pushed only after that turn ends), continuous review (with `queueSize: 2` the loop still asks all 5 due words, then goes `idle` with a `no-due` reason), the QQ idle note, **the plugin veto (a model `✅` with a different meaning is scheduled as wrong)**, **the fuzzy half-step**, **a fuzzy followed by a matching ✅ advancing the ladder**, **the weak-word book plus Known/Ask again/Remove and the CSV export**, **the ledger schema guard**, **"不知道" being wrong even when the model says `✅`**, **a half-matched rewording graded half-known and joining the gloss pool**, **the article import (basic words filtered, `:out` refused, batch capped, loop waiting for Start, protocol updated)**, **the article edge cases (all-basic list, already-known words)**, **the exam scope (per-call exam level, `:out` refusal, `examLevel` as the default)**, **the ease factor**, **CSV/JSON/Anki exports**, **the daily history**, **diagnostics + last import**, and **the 1500-word performance check**.
+- `node test/harness.mjs` — Host harness: 3-word import, ✅/❌ ledger updates, compact injection, loop Pause (no prompt, queue kept), Start resume without double-counting, `dailyTotalLimit=5`, live settings edits, once-per-day reminder, date rollover, reload persistence, the QQ channel (binding discovery, Start pushes `Q:` through `send_qq_message` without prompting the web session, QQ-graded answer recorded, next question pushed only after that turn ends), continuous review (with `queueSize: 2` the loop still asks all 5 due words, then goes `idle` with a `no-due` reason), the QQ idle note, **the plugin veto (a model `✅` with a different meaning is scheduled as wrong)**, **the fuzzy half-step**, **a fuzzy followed by a matching ✅ advancing the ladder**, **the weak-word book plus Known/Ask again/Remove and the CSV export**, **the ledger schema guard**, **"不知道" being wrong even when the model says `✅`**, **a half-matched rewording graded half-known and joining the gloss pool**, **the article import (basic words filtered, `:out` refused, batch capped, loop waiting for Start, protocol updated)**, **the article edge cases (all-basic list, already-known words)**, **the exam scope (per-call exam level, `:out` refusal, `examLevel` as the default)**, **the ease factor**, **CSV/JSON/Anki exports**, **the daily history**, **diagnostics + last import**, **the 1500-word performance check**, **exam high-frequency `extra` words on a worksheet import (filtered, capped, source `exam`)**, and **`includeHighFreq: false` importing underlined words only**.
 - `node test/qq-builtin.mjs` — offline built-in QQ test with a fake gateway and fake HTTP: token → gateway → identify, heartbeat, inbound text → session prompt → relay, inbound image → image prompt block, 开始背单词 pushing `Q:` directly, grading round trip + next question, message deduplication, disconnect/disable status.
 - `node test/sessions-stop.mjs` — conversation list (titles, archived/subagent excluded), selection persisted in `settings.json` + reload, Start routed to the selected session, strong-pause Stop (cancel + jobs/terminals/subagents, silent, `turnInFlight` false), idle Stop no-op, archived-selection fallback.
 - `node test/client-load-check.mjs` — evaluates the Client bundle with a mocked module loader and asserts the sidebar/main registrations.
