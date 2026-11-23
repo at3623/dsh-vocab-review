@@ -254,8 +254,8 @@ assert.equal(panels.length, 1, 'command panel created')
 assert.equal(panels[0].panel.remark, 'dsh-vocab-review')
 assert.deepEqual(
   panels[0].panel.items.map((item) => item.name),
-  ['start', 'stats', 'stop', 'help'],
-  'the panel exposes /start /stats /stop /help',
+  ['start', 'stats', 'stop', 'reset', 'help'],
+  'the panel exposes /start /stats /stop /reset /help',
 )
 ws.dispatch('READY', { session_id: 'gateway-session' })
 await wait(30)
@@ -371,11 +371,18 @@ assert.ok(sentMessages[sentMessages.length - 1].body.content.includes('到期'),
 ws.dispatch('C2C_MESSAGE_CREATE', { id: 'msg-7', content: '/help', author: { user_openid: 'OPENID_1' } })
 await wait(40)
 assert.ok(sentMessages[sentMessages.length - 1].body.content.includes('/start'), '/help lists the commands')
+ws.dispatch('C2C_MESSAGE_CREATE', { id: 'msg-reset', content: '/reset', author: { user_openid: 'OPENID_1' } })
+await wait(40)
+assert.ok(sentMessages[sentMessages.length - 1].body.content.includes('已重置'), '/reset clears the schedule')
+const afterReset = await stateOf(env.routes)
+assert.equal(afterReset.loop, 'stopped')
+assert.equal(afterReset.counters.errors, 0, 'the reset clears the wrong-answer counters')
+assert.ok(afterReset.weakWords.length === 0, 'the weak-word book is empty after a reset')
 ws.dispatch('C2C_MESSAGE_CREATE', { id: 'msg-8', content: '/start', author: { user_openid: 'OPENID_1' } })
 await wait(40)
 assert.match(sentMessages[sentMessages.length - 1].body.content, /^Q: /u, '/start pushes the next question')
 assert.equal((await stateOf(env.routes)).loop, 'running')
-console.log('PASS builtin QQ: /stop /stats /help /start from the command panel are handled')
+console.log('PASS builtin QQ: /stop /stats /help /reset /start from the command panel are handled')
 
 // ── 7. Dedupe + disconnect status ────────────────────────────────────────
 const promptsBefore = env.prompts.length

@@ -26,6 +26,7 @@ const PANEL_ITEMS = Object.freeze([
   { type: 'command', name: 'start', desc: '开始背单词复习' },
   { type: 'command', name: 'stats', desc: '查看到期与错词' },
   { type: 'command', name: 'stop', desc: '停止复习，队列保留' },
+  { type: 'command', name: 'reset', desc: '重置复习进度（保留词义）' },
   { type: 'command', name: 'help', desc: '查看可用命令' },
 ])
 

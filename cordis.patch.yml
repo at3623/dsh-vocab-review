@@ -8,8 +8,15 @@
 # editable at runtime from the sidebar panel and stored in settings.json.
 #
 # verifyAnswers: the plugin re-checks every model ✅ against the meaning it
-# stored for that word and schedules a mismatch as wrong. Set it to false to
-# trust the model's grading alone (the pre-1.4 behaviour).
+# stored for that word and schedules a mismatch as wrong. It only does so when
+# the user's short typed answer is actually visible (DSH system-reminder context
+# is stripped first). Set it to false to trust the model's grading alone.
+#
+# ladderMinutes: the interval a ✅ earns is the rung the word is on NOW; the word
+# only steps up afterwards (30m -> 3h -> 12h -> 2d -> 7d -> 30d). A ❌ is not a
+# rung: it drops the word to rung 0 and re-asks it after retryDelayMinutes.
+# wrongInject only orders words that are already due — nothing is asked before
+# its dueAt.
 #
 # articleMaxWords: a plain article image (no underlines) goes through
 # vocab_import_article; the model picks the exam high-frequency words, basic

@@ -118,16 +118,20 @@ dsh plugin --profile <profile> add github:at3623/dsh-vocab-review
 - 批改不是模型一个人说了算：模型给 ✅ 时，插件还会拿**上次存下的词义**和你实际打的字做比对（见下文「三档判定与二次校验」）。
 - **到期词、错误次数、每日限额、下次复习时间全部由插件计算**，模型完全不参与，所以不会算错、不会"自由发挥"。
 
-间隔阶梯（固定阶梯，类似 SM-2 的简化版）：
+间隔阶梯（固定阶梯，类似 SM-2 的简化版）。**间隔取"当前所在的档"，答对之后才升档**，所以 30 分钟这一档是真的会用到的：
 
 ```text
-答对：30 分钟 → 3 小时 → 12 小时 → 2 天 → 7 天 → 30 天
-模糊：保持当前档位，半个间隔后重问（例如第 0 档 30 分钟 → 15 分钟后）
-答错：退回第 0 档，retryDelayMinutes（默认 5 分钟）后重问
+答对：在当档取间隔，然后升一档 → 30 分钟 → 3 小时 → 12 小时 → 2 天 → 7 天 → 30 天
+      （新词第一次答对等 30 分钟，之后 3 小时、12 小时……不是一上来就 3 小时）
+模糊：档位不动，半个间隔后重问（第 0 档 → 15 分钟；只对上一半词义时更短：×0.35）
+答错：退回第 0 档，retryDelayMinutes（默认 5 分钟）后重问；从高档掉下来记一次 lapse
 高频词：间隔 × 0.7（问得更勤）   低频词：间隔 × 1.6（问得更稀）
 难度因子 ease（0.7–1.5）：答对 +0.05、模糊 −0.05、答错 −0.15
-            实际间隔 = 阶梯 × 频率系数 × ease —— 熟词越问越稀，生词越问越密
+            实际间隔 = 当前档间隔 × 频率系数 × ease —— 熟词越问越稀，生词越问越密
+另外：没有任何词会在 dueAt 之前被问到 —— 队列只装此刻已到期的词（v2.2.0）
 ```
+
+也就是说，同一个词的时间线通常是：答错 → 5 分钟后回来 → 答对 → 30 分钟 → 答对 → 3 小时 → 答对 → 12 小时…… **答错和答对不会拿到一样的间隔**。如果你看到两者一样，先看面板诊断区的「插件改判」（v2.2.0 之前有一条 bug：DSH 附在消息里的 `<system-reminder>` 会被当成你的答案，导致答对的 ✅ 被误判成错，于是全变成 5 分钟重问），再考虑用「重置复习进度」清掉被误判污染的记录。
 
 ### 三档判定与二次校验
 
@@ -135,7 +139,7 @@ dsh plugin --profile <profile> add github:at3623/dsh-vocab-review
 
 | 档位 | 什么时候用 | 怎么排期 |
 | --- | --- | --- |
-| `✅` 会 | 答出且词义对得上 | 升一档，按新档间隔 |
+| `✅` 会 | 答出且词义对得上 | 在**当前档**取间隔，然后升一档 |
 | `🤔` 模糊 | 答对了但你在犹豫（"好像…"、"不确定"）、只说了部分词义、或反问 | 档位不动，半个间隔后重问（只对上一半词义时更短：×0.35） |
 | `❌` 不会 | 答错、答"不知道/忘了"、或没答 | 退回第 0 档，`retryDelayMinutes` 后重问 |
 
@@ -146,6 +150,8 @@ dsh plugin --profile <profile> add github:at3623/dsh-vocab-review
 - 你直接说「不知道 / 忘了 / 不会」时，即使模型误判成 ✅，也一律算错。
 - 首次出现的词没有参照词义，此时不做否决，以模型为准——避免误伤同义说法。
 - 比对是**启发式**的：短中文答法（"真的" 对 "真正的；真诚的"）按字符包含判断，不会被误判；但如果你用的说法和已存释义完全对不上（确实是同义词），仍可能被判错一次；下一次模型给的释义会进 `meanings` 池，之后两种说法都算对。想完全回到「模型说了算」，把 `verifyAnswers` 设为 `false`。
+- **只把"像答案的短回复"当答案**（v2.2.0）：DSH 会往用户消息里附带 `<system-reminder>…</system-reminder>` 一类上下文，插件先把它剥掉再比对；剥完如果不像作答（带标签、超过 120 字、或只剩提醒文本），就不做否决、以模型为准——误否决比相信一次 ✅ 更伤。v2.2.0 之前没有这层清理，带提醒的那一轮会把答对的 ✅ 误判成错，这正是"答错和答对间隔看起来一样"的原因（近两次的记录里几乎每题都被记成错）。
+- 否决会留痕：最近 20 条记在 `conflicts`，面板显示最近一条 `插件改判`。如果同一段时间大量出现改判，先看诊断区，别急着怀疑自己的记忆。
 
 ### 薄弱词本与导出
 
@@ -160,6 +166,16 @@ dsh plugin --profile <profile> add github:at3623/dsh-vocab-review
   - **Anki**（`word<TAB>meaning<TAB>dsh-vocab` 的 TSV，Anki 里按 Tab 分隔导入即可）。
 
 面板还会显示**近 7 天趋势**（每天「题/错」）和一行「上次导入」摘要（导入了多少、跳过多少基础词/超纲词；如果解析出的词明显偏少会提示改用文字词表）。
+
+### 重置复习进度（v2.2.0）
+
+面板「诊断」区有 **重置复习进度** 按钮，QQ 里发 `/reset` 也行：清空每个词的错误/模糊次数、阶梯、ease、lapses 和到期时间，**词义保留**，所有词回到今天到期、循环停止，重新点开始就按新节奏排期。用在这些场景：
+
+- 历史记录被误判污染（比如 v2.2.0 之前那批被 `<system-reminder>` 判错的 ✅），想让真实水平和排期重新对齐；
+- 换了考试范围、或导入的旧词表复习过一轮，想从零开始；
+- 只是嫌当前错词池太吵。
+
+接口是 `POST /api/dsh-vocab-review/words/reset`，必须带 `{"confirm": true}`，防止误点。
 
 
 ### 自动续轮（v1.3.1 之后的默认行为）
@@ -201,8 +217,7 @@ dsh plugin --profile <profile> add github:at3623/dsh-vocab-review
 - 上限提示 `今日已达上限 (…)` 与"到期了"横幅；
 - 停止后说明为什么停（`idleReason`）；
 - 开始 / 继续 / 停止 / 暂停；
-- **薄弱词本**（答错或只记得一半的词，按错次排序；可「已掌握 / 重问 / 删除」、一键导出 CSV / JSON / Anki）、当前队列；
-- 插件改判提示（`lastConflict`：模型判对但词义不符的那一次）；
+- **薄弱词本**（答错或只记得一半的词，按错次排序；可「已掌握 / 重问 / 删除」、一键导出 CSV / JSON / Anki）、当前队列；- 插件改判提示（`lastConflict`：模型判对但词义不符的那一次）；
 - 近 7 天趋势（每天「题/错」）与「上次导入」摘要；
 - 折叠的**诊断**区：词库大小、上次保存耗时、队列长度、复核与考试范围；
 - 可编辑限额与提醒次数，「保存」即时写入 `settings.json`。
@@ -312,10 +327,11 @@ npm test          # 4 个离线 harness
 npm run check     # 语法检查
 ```
 
-- `test/harness.mjs` —— 32 项：导入、✅/❌/🤔 记账、压缩注入、停止/继续、每日限额、面板改限额、每日提醒、跨天清零、重启持久化、QQ 通道、**自动续轮**、QQ 自动停下时推一条说明、**插件否决模型 ✅**、**模糊半档**、**🤔 后正常 ✅ 升档**、**薄弱词本 + 已掌握/重问/删除 + CSV 导出**、**ledger 版本守卫**、**「不知道」一律算错**、**短中文近义半会并记入词义池**、**文章导入（过滤基础词 + 拒收 `:out` 超纲词 + 限流 + 不自动开始）**、**文章导入边界（全是基础词 / 已有词）**、**考试范围（单次指定考试、`:out` 拒收、`examLevel` 默认值）**、**难度因子 ease**、**CSV/JSON/Anki 三种导出**、**每日历史**、**诊断字段与上次导入**、**1500 词性能**、**划线图附带 `extra` 高频词（过滤 + 限量 + 来源标记）**、**`includeHighFreq:false` 只收划线词**、**HTTP 路由的 connection 信任检查**。
-- `test/qq-builtin.mjs` —— 内置 QQ 的离线联调（假网关 + 假 HTTP）：token→gateway→identify、心跳、入境文字→会话提示→回传、入境图片→图片块、命令「开始背单词」直接推题、答题批改后推下一题、消息去重、断线/禁用状态。
+- `test/harness.mjs` —— 36 项：导入、✅/❌/🤔 记账、压缩注入、停止/继续、每日限额、面板改限额、每日提醒、跨天清零、重启持久化、QQ 通道、**自动续轮**、QQ 自动停下时推一条说明、**插件否决模型 ✅**、**模糊半档**、**🤔 后正常 ✅ 升档**、**薄弱词本 + 已掌握/重问/删除 + CSV 导出**、**ledger 版本守卫**、**「不知道」一律算错**、**短中文近义半会并记入词义池**、**文章导入（过滤基础词 + 拒收 `:out` 超纲词 + 限流 + 不自动开始）**、**文章导入边界（全是基础词 / 已有词）**、**考试范围（单次指定考试、`:out` 拒收、`examLevel` 默认值）**、**难度因子 ease**、**CSV/JSON/Anki 三种导出**、**每日历史**、**诊断字段与上次导入**、**1500 词性能**、**划线图附带 `extra` 高频词（过滤 + 限量 + 来源标记）**、**`includeHighFreq:false` 只收划线词**、**HTTP 路由的 connection 信任检查**、**阶梯曲线（✅ 30 分钟→3 小时→12 小时、❌ 5 分钟回到第一档并记 lapse）**、**不会提前问到期的词**、**`<system-reminder>` 不再误否决 ✅**、**重置进度（需确认、保留词义）**。
+- `test/qq-builtin.mjs` —— 内置 QQ 的离线联调（假网关 + 假 HTTP）：token→gateway→identify、心跳、入境文字→会话提示→回传、入境图片→图片块、命令「开始背单词」直接推题、答题批改后推下一题、`/start /stats /stop /reset /help` 命令面板、消息去重、断线/禁用状态。
 - `test/sessions-stop.mjs` —— 对话列表/选择持久化/路由、强暂停、归档回落。
 - `test/client-load-check.mjs` —— 用 mock loader 跑一遍 Client 半边，确认侧栏与面板注册。
+- `test/locale-check.mjs` —— 校验 `locale/zh.json`、`locale/en.json` 是合法 JSON 且元数据完整（`npm run check` 会跑；之前 en.json 里一处未转义的引号就是靠它发现的）。
 - `test/make_test_image.py` —— 重新生成 3 个划线词的测试图片。
 
 ### 限制
@@ -390,7 +406,7 @@ The third-party `@hualiong/dsh-qq-bot` plugin is only an **alternative transport
 
    The model asks exactly one word (`Q: {word}`). After the answer it emits exactly one line, `✅ {word} = {meaning}` (known), `🤔 {word} = {meaning}` (half-known) or `❌ {word} = {meaning}` (unknown). The plugin watches the committed session event, records the result, and wakes the same chat with `继续复习` for the next word. The model never computes due words, quota, or scheduling — and it does not get the final say on correctness either: a model `✅` is re-checked against the stored meaning (see below).
 3. **Wrong-word ledger** — every error increments `errors` and stamps `lastErrorAt` in `<DSH_HOME>/vocab-review/ledger.json`; a fuzzy answer increments `fuzzy` instead. A correct answer advances the spaced-repetition stage and schedules the next review; the error history stays.
-4. **Spaced repetition** — ladder `30m → 3h → 12h → 2d → 7d → 30d`, modulated by a per-word **ease factor** (0.7–1.5; +0.05 per correct answer, −0.05 fuzzy, −0.15 wrong): a word you keep getting right drifts out, a shaky word tightens up. A wrong answer resets the word to stage 0 and re-queues it after `retryDelayMinutes`. The queue builder pulls due reviews first, then due new words, injects a configurable number of previously-wrong words at random, then fills the rest with higher-frequency words (high-frequency weighted up, low-frequency down).
+4. **Spaced repetition** — ladder `30m → 3h → 12h → 2d → 7d → 30d`. A correct answer takes the interval of the **current** rung and only then advances one rung, so a brand-new word that you answer correctly waits 30 minutes before it jumps to 3 hours. A per-word **ease factor** (0.7–1.5; +0.05 per correct answer, −0.05 fuzzy, −0.15 wrong) bends each rung: a word you keep getting right drifts out, a shaky word tightens up. A wrong answer resets the word to stage 0 and re-queues it after `retryDelayMinutes` (default 5) — a mistake is a re-learning step, never a ladder rung. The queue builder only ever holds words whose `dueAt <= now`: due reviews first (the most error-prone ones are boosted to the front by `wrongInject`), then due new words. Nothing is pulled forward before its due time.
 5. **Persistence** — `ledger.json` (words, queue, loop state, daily counters) and `settings.json` (limits + reminder bookkeeping) are written atomically (temp file + rename). Page reloads never touch Host state; a Host restart reloads the queue and keeps the loop **stopped** until Start is pressed.
 
 ## Article images (exam high-frequency words)
@@ -438,7 +454,7 @@ Two tiers force "recognised after a pause" into "known", which pushes the word 3
 
 | Grade | When | Scheduling |
 | --- | --- | --- |
-| `✅` known | Answer matches the meaning | Advance one stage, next review at the new interval |
+| `✅` known | Answer matches the meaning | Takes the interval of the **current** rung, then advances one rung |
 | `🤔` half-known | Right, but the user hedged (`好像…`, `不确定`), gave only part of the meaning, or asked back | Stage unchanged, comes back after **half** the current interval at most (×0.35 when only half the gloss matched) |
 | `❌` unknown | Wrong, "不知道/忘了", or no answer | Reset to stage 0, re-ask after `retryDelayMinutes` |
 
@@ -449,6 +465,8 @@ Plugin-side verification (`verifyAnswers: true`, the default):
 - An explicit "不知道 / 忘了 / 不会" is always wrong, even if the model says `✅`.
 - A word seen for the first time has no reference gloss yet, so the model's first grading stands — this avoids punishing synonyms.
 - The comparison is a **heuristic**: a short Chinese rewording of the stored gloss ("真的" for "真正的；真诚的") is accepted by character containment, so it is not punished; a synonym that shares nothing with the stored gloss is still counted wrong once, and the model's next gloss joins `meanings`, after which both wordings pass. Set `verifyAnswers: false` to go back to trusting the model alone.
+- **Only a short reply that looks like an answer is treated as one** (v2.2.0). DSH attaches `<system-reminder>…</system-reminder>` blocks (session facts, file policy, …) to the user turn; the plugin strips them before comparing, and when what is left does not look like an answer (markup, over 120 characters, reminder text only) it does **not** veto — trusting one `✅` is cheaper than a false downgrade. Before v2.2.0 the reminder text was compared as if it were the answer, so a correct `✅` on every turn that carried a reminder was recorded as wrong. That is exactly why wrong and right answers seemed to come back at the same interval: nearly every answer was being recorded as wrong (5-minute retry).
+- A veto is auditable: the last 20 are kept in `conflicts` and the panel shows the latest one as `插件改判`. A burst of vetoes is a signal to look at the diagnostics, not at your memory.
 
 ## Weak-word book and CSV export
 
@@ -462,6 +480,16 @@ The panel lists every word with `errors > 0` or `fuzzy > 0`, hardest first, with
 - **Export Anki** — `word<TAB>meaning<TAB>dsh-vocab` TSV, imported by Anki with a tab separator.
 
 The panel also shows a **last-7-days trend** (asked/wrong per day) and a one-line **last import** summary (how many words were added, how many basic/out-of-scope words were dropped — with a hint to paste the text when the image probably lost words).
+
+## Reset progress (v2.2.0)
+
+The **Diagnostics** block has a **Reset progress** button (QQ: `/reset`). It clears every word's wrong/half counts, ladder stage, ease, `lapses` and due date — **glosses are kept** — makes every word due today and stops the loop, so the next Start re-schedules from scratch. Use it when:
+
+- the history was polluted by mis-graded answers (e.g. the `<system-reminder>` vetoes before v2.2.0) and you want the schedule to match your real level again;
+- you changed the exam scope, or finished a first pass over an old word list;
+- the weak-word book is just noise now.
+
+API: `POST /api/dsh-vocab-review/words/reset` with `{"confirm": true}` (required, so a stray click cannot wipe the schedule).
 
 ## Daily quota (req. 11)
 
@@ -564,11 +592,12 @@ It is silent: no prompt, no `steer`, no fake transcript message. Afterwards the 
 
 ## Verification
 
-- `npm test` — runs the three offline harnesses below.
-- `node test/harness.mjs` — Host harness: 3-word import, ✅/❌ ledger updates, compact injection, loop Pause (no prompt, queue kept), Start resume without double-counting, `dailyTotalLimit=5`, live settings edits, once-per-day reminder, date rollover, reload persistence, the QQ channel (binding discovery, Start pushes `Q:` through `send_qq_message` without prompting the web session, QQ-graded answer recorded, next question pushed only after that turn ends), continuous review (with `queueSize: 2` the loop still asks all 5 due words, then goes `idle` with a `no-due` reason), the QQ idle note, **the plugin veto (a model `✅` with a different meaning is scheduled as wrong)**, **the fuzzy half-step**, **a fuzzy followed by a matching ✅ advancing the ladder**, **the weak-word book plus Known/Ask again/Remove and the CSV export**, **the ledger schema guard**, **"不知道" being wrong even when the model says `✅`**, **a half-matched rewording graded half-known and joining the gloss pool**, **the article import (basic words filtered, `:out` refused, batch capped, loop waiting for Start, protocol updated)**, **the article edge cases (all-basic list, already-known words)**, **the exam scope (per-call exam level, `:out` refusal, `examLevel` as the default)**, **the ease factor**, **CSV/JSON/Anki exports**, **the daily history**, **diagnostics + last import**, **the 1500-word performance check**, **exam high-frequency `extra` words on a worksheet import (filtered, capped, source `exam`)**, **`includeHighFreq: false` importing underlined words only**, and **the connection trust fence on the HTTP routes**.
+- `npm test` — runs the four offline harnesses below.
+- `node test/harness.mjs` — Host harness: 3-word import, ✅/❌ ledger updates, compact injection, loop Pause (no prompt, queue kept), Start resume without double-counting, `dailyTotalLimit=5`, live settings edits, once-per-day reminder, date rollover, reload persistence, the QQ channel (binding discovery, Start pushes `Q:` through `send_qq_message` without prompting the web session, QQ-graded answer recorded, next question pushed only after that turn ends), continuous review (with `queueSize: 2` the loop still asks all 5 due words, then goes `idle` with a `no-due` reason), the QQ idle note, **the plugin veto (a model `✅` with a different meaning is scheduled as wrong)**, **the fuzzy half-step**, **a fuzzy followed by a matching ✅ advancing the ladder**, **the weak-word book plus Known/Ask again/Remove and the CSV export**, **the ledger schema guard**, **"不知道" being wrong even when the model says `✅`**, **a half-matched rewording graded half-known and joining the gloss pool**, **the article import (basic words filtered, `:out` refused, batch capped, loop waiting for Start, protocol updated)**, **the article edge cases (all-basic list, already-known words)**, **the exam scope (per-call exam level, `:out` refusal, `examLevel` as the default)**, **the ease factor**, **CSV/JSON/Anki exports**, **the daily history**, **diagnostics + last import**, **the 1500-word performance check**, **exam high-frequency `extra` words on a worksheet import (filtered, capped, source `exam`)**, **`includeHighFreq: false` importing underlined words only**, and **the connection trust fence on the HTTP routes**, **the ladder curve (✅ 30m → 3h → 12h, ❌ retried after 5m from the bottom rung plus a lapse count)**, **Start never pulling a word forward before its `dueAt`**, **`<system-reminder>` no longer vetoing a correct `✅`**, and **reset progress (confirmation required, glosses kept)**.
 - `node test/qq-builtin.mjs` — offline built-in QQ test with a fake gateway and fake HTTP: token → gateway → identify, heartbeat, inbound text → session prompt → relay, inbound image → image prompt block, 开始背单词 pushing `Q:` directly, grading round trip + next question, message deduplication, disconnect/disable status.
 - `node test/sessions-stop.mjs` — conversation list (titles, archived/subagent excluded), selection persisted in `settings.json` + reload, Start routed to the selected session, strong-pause Stop (cancel + jobs/terminals/subagents, silent, `turnInFlight` false), idle Stop no-op, archived-selection fallback.
 - `node test/client-load-check.mjs` — evaluates the Client bundle with a mocked module loader and asserts the sidebar/main registrations.
+- `node test/locale-check.mjs` — validates that `locale/zh.json` and `locale/en.json` are valid JSON with complete metadata (run by `npm run check`; it is what caught an unescaped quote in `en.json`).
 - `test/make_test_image.py` — regenerates the 3-underlined-word fixture (`pip install pillow`).
 - `node test/restart-check.mjs` (not in CI) — loads the profile-installed package with the real ledger/settings; requires a local DSH profile.
 

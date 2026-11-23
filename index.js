@@ -37,9 +37,15 @@ const DEFAULTS = {
   // the queue drains, so this is a batch size, not a session length.
   queueSize: 5,
   autoContinue: true,
+  // How many of the most error-prone DUE reviews are pulled to the front of a
+  // queue. This orders already-due words; it never pulls a word forward before
+  // its dueAt (that would break the spacing the ladder just earned).
   wrongInject: 2,
+  // A wrong answer comes back after this fixed retry gap, never on a ladder
+  // rung: a mistake is a re-learning step, not progress.
   retryDelayMinutes: 5,
-  // The plugin re-checks a model `✅` against the meaning it stored last time.
+  // The plugin re-checks a model `✅` against the meaning it stored last time,
+  // but only when the user's typed answer is actually visible as a short reply.
   // A mismatch is scheduled as wrong: the model alone must not decide that a
   // different meaning is an acceptable answer.
   verifyAnswers: true,
@@ -52,7 +58,7 @@ const DEFAULTS = {
   // Which exam's high-frequency words an article import should target:
   // gaokao | cet4 | cet6 | kaoyan | any.
   examLevel: 'cet4',
-  ladderMinutes: [30, 180, 720, 2880, 10080, 43200], // 30m, 3h, 12h, 2d, 7d, 30d
+  ladderMinutes: [30, 180, 720, 2880, 10080, 43200], // 30m, 3h, 12h, 2d, 7d, 30d — the gap a ✅ earns on the rung the word is on
   highMultiplier: 0.7,
   lowMultiplier: 1.6,
   maxRecentErrors: 5,
@@ -269,42 +275,6 @@ function frequencyMultiplier(freq, cfg) {
   return 1
 }
 
-function fillWeight(freq) {
-  if (freq === 'high') return 4
-  if (freq === 'low') return 1
-  return 2
-}
-
-function shuffle(list) {
-  const copy = list.slice()
-  for (let i = copy.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1))
-    const tmp = copy[i]
-    copy[i] = copy[j]
-    copy[j] = tmp
-  }
-  return copy
-}
-
-function shuffledWeighted(list, count) {
-  const pool = list.slice()
-  const out = []
-  while (out.length < count && pool.length > 0) {
-    const total = pool.reduce((sum, entry) => sum + fillWeight(entry.freq), 0)
-    let ticket = Math.random() * total
-    let index = pool.length - 1
-    for (let i = 0; i < pool.length; i++) {
-      ticket -= fillWeight(pool[i].freq)
-      if (ticket <= 0) {
-        index = i
-        break
-      }
-    }
-    out.push(pool.splice(index, 1)[0])
-  }
-  return out
-}
-
 function messageText(message) {
   if (!message || !Array.isArray(message.content)) return ''
   return message.content
@@ -376,6 +346,7 @@ export function apply(ctx, config) {
       qqError: '',
       qqTarget: null,
       lastConflict: null,
+      conflicts: [],
       words: {},
     }
   }
@@ -401,6 +372,7 @@ export function apply(ctx, config) {
       correct: Number.isFinite(value.correct) ? value.correct : 0,
       errors: Number.isFinite(value.errors) ? value.errors : 0,
       fuzzy: Number.isFinite(value.fuzzy) ? value.fuzzy : 0,
+      lapses: Number.isFinite(value.lapses) ? value.lapses : 0,
       source: value.source === 'article' ? 'article' : value.source === 'exam' ? 'exam' : 'list',
     }
   }
@@ -840,6 +812,7 @@ export function apply(ctx, config) {
   const QQ_START = /^(?:开始|继续|开启|开背|开始背单词|开启复习|开始复习|继续复习|start|continue)[\s!！。.]*$/iu
   const QQ_STOP = /^(?:停止|暂停|结束|stop|pause)[\s!！。.]*$/iu
   const QQ_STATS = /^(?:统计|状态|进度|stats|status)[\s!！。.]*$/iu
+  const QQ_RESET = /^(?:重置进度|重置复习|重置|清除进度|reset)[\s!！。.]*$/iu
 
   async function handleQqCommand(text, message) {
     const raw = String(text || '').trim()
@@ -859,7 +832,9 @@ export function apply(ctx, config) {
         const reason =
           result.error === 'quota'
             ? result.quota && result.quota.message
-            : '词库还是空的：先在 DSH 网页里上传单词表或文章图片导入。'
+            : result.error === 'no-due'
+              ? `现在没有到期的单词${Number.isFinite(result.nextDueAt) ? `，下一个 ${clockText(result.nextDueAt)} 到期` : ''}。`
+              : '词库还是空的：先在 DSH 网页里上传单词表或文章图片导入。'
         await sendToQqChat(message, reason || '暂时无法开始')
         return true
       }
@@ -881,10 +856,18 @@ export function apply(ctx, config) {
       )
       return true
     }
+    if (QQ_RESET.test(command)) {
+      const result = resetProgress()
+      await sendToQqChat(
+        message,
+        `已重置 ${result.words} 个词的复习进度：错误次数与阶梯清零，词义保留，全部回到今天到期。回「开始背单词」重新排期。`,
+      )
+      return true
+    }
     if (/^(?:help|\?|命令|帮助)$/iu.test(command)) {
       await sendToQqChat(
         message,
-        '可用命令：/start 开始背单词 · /stats 统计 · /stop 停止 · /help 帮助。也可以直接发图片导入单词，发中文「开始背单词 / 统计 / 停止」同样有效。',
+        '可用命令：/start 开始背单词 · /stats 统计 · /stop 停止 · /reset 重置进度 · /help 帮助。也可以直接发图片导入单词，发中文「开始背单词 / 统计 / 停止」同样有效。',
       )
       return true
     }
@@ -1154,41 +1137,32 @@ export function apply(ctx, config) {
     return Math.min(Math.max(floor, scaled), base)
   }
 
-  // `dueOnly` is the continuous mode: it only ever takes words that are due
-  // right now, so an auto-continued loop stops instead of asking a word far
-  // ahead of its schedule.
-  function buildQueue(now = Date.now(), options = {}) {
-    const dueOnly = options.dueOnly === true
+  // A word is never asked before it is due: `dueAt` is the whole schedule.
+  // A ✅ pushes it out one rung, a ❌ brings it back after retryDelayMinutes,
+  // and the queue only ever holds `dueAt <= now`. Inside that set, due reviews
+  // come before due new words and the most error-prone reviews first, so a
+  // mistake is revisited soon without breaking the spacing of everything else.
+  function buildQueue(now = Date.now()) {
+    const due = dueNowList(now)
+    const dueReviews = due.filter((word) => !isNewWord(word))
+    const dueNew = due.filter((word) => isNewWord(word))
+    const boosted = dueReviews
+      .filter((word) => word.errors > 0)
+      .sort((a, b) => b.errors - a.errors || a.dueAt - b.dueAt)
+      .slice(0, cfg.wrongInject)
+    const boostedSet = new Set(boosted.map((word) => word.word))
+    const restReviews = dueReviews
+      .filter((word) => !boostedSet.has(word.word))
+      .sort((a, b) => a.dueAt - b.dueAt)
+    const fresh = dueNew.sort((a, b) => a.dueAt - b.dueAt)
     const picked = []
     const seen = new Set()
-    const take = (word) => {
-      if (picked.length >= cfg.queueSize) return
-      if (seen.has(word.word)) return
+    for (const word of [...boosted, ...restReviews, ...fresh]) {
+      if (picked.length >= cfg.queueSize) break
+      if (seen.has(word.word)) continue
       seen.add(word.word)
       picked.push(word.word)
     }
-
-    // 1. Due items first; due reviews before due new words.
-    const due = dueNowList(now).sort((a, b) => {
-      const aNew = isNewWord(a) ? 1 : 0
-      const bNew = isNewWord(b) ? 1 : 0
-      if (aNew !== bNew) return aNew - bNew
-      return a.dueAt - b.dueAt
-    })
-    for (const word of due) take(word)
-    if (dueOnly) return picked
-
-    // 2. Randomly inject previously-wrong items.
-    const wrongPool = shuffle(entries().filter((word) => word.errors > 0 && !seen.has(word.word)))
-    for (const word of wrongPool.slice(0, cfg.wrongInject)) take(word)
-
-    // 3. Fill remaining slots: already-reviewed words first, new words after.
-    const rest = entries().filter((word) => !seen.has(word.word))
-    const reviewed = rest.filter((word) => !isNewWord(word))
-    const fresh = rest.filter((word) => isNewWord(word))
-    for (const word of shuffledWeighted(reviewed, cfg.queueSize - picked.length)) take(word)
-    for (const word of shuffledWeighted(fresh, cfg.queueSize - picked.length)) take(word)
-
     return picked
   }
 
@@ -1215,7 +1189,7 @@ export function apply(ctx, config) {
     if (state.queue.length === 0 && cfg.autoContinue) {
       // Continuous review: refill with words that are due now and keep asking.
       // This is what makes a session run past one queueSize batch.
-      const refilled = buildQueue(Date.now(), { dueOnly: true })
+      const refilled = buildQueue(Date.now())
       if (refilled.length > 0) {
         state.queue = refilled
         state.queueCreatedAt = Date.now()
@@ -1306,8 +1280,15 @@ export function apply(ctx, config) {
       state.queue = buildQueue()
       state.queueCreatedAt = Date.now()
       if (state.queue.length === 0) {
-        goIdle({ kind: 'empty', nextDueAt: null }, { silent: true })
-        return { ok: false, error: 'no-words' }
+        // Words exist but none is due: that is "come back later", not an empty
+        // library. The next due time makes the difference visible.
+        const total = entries().length
+        const next = nextDueAt()
+        goIdle(
+          total === 0 ? { kind: 'empty', nextDueAt: null } : { kind: 'no-due', nextDueAt: next },
+          { silent: true },
+        )
+        return { ok: false, error: total === 0 ? 'no-words' : 'no-due', nextDueAt: next }
       }
     }
     if (state.pendingWord && !state.queue.includes(state.pendingWord)) {
@@ -1339,9 +1320,40 @@ export function apply(ctx, config) {
   // no answer to re-check.
   let lastUserMessage = { text: '', at: 0, sessionId: '' }
 
+  // DSH attaches `<system-reminder>…</system-reminder>` blocks (session facts,
+  // file policy, …) to the user turn. They are not the answer: stripping them
+  // is what keeps a correct reply from being vetoed by reminder boilerplate —
+  // before this, every turn that carried a reminder was recorded as wrong.
+  const INJECTED_BLOCK = /<system-reminder\b[^>]*>[\s\S]*?<\/system-reminder>/giu
+  const INJECTED_TAG = /<\/?(?:system-reminder|system|reminder)\b[^>]*>/giu
+
+  function stripInjected(text) {
+    return String(text === undefined || text === null ? '' : text)
+      .replace(INJECTED_BLOCK, ' ')
+      .replace(INJECTED_TAG, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+  }
+
+  // A message only counts as an answer when it still looks like one after the
+  // reminder blocks are gone: markup, a pasted paragraph or a bracket-tagged
+  // prompt is not what a learner types for a vocabulary question. When it
+  // does not look like an answer the plugin keeps the model's verdict instead
+  // of guessing (a false veto is worse than trusting a ✅).
+  function looksLikeAnswer(text) {
+    if (!text) return false
+    if (text.length > 120) return false
+    if (/[<>]/u.test(text)) return false
+    if (/^\[[a-z]+\]/iu.test(text)) return false
+    return true
+  }
+
   function rememberUserText(text, sessionId) {
+    const clean = stripInjected(text)
+    // A reminder-only turn must not erase the answer typed a moment earlier.
+    if (!clean) return
     lastUserMessage = {
-      text: typeof text === 'string' ? text : '',
+      text: clean,
       at: Date.now(),
       sessionId: typeof sessionId === 'string' ? sessionId : '',
     }
@@ -1351,8 +1363,8 @@ export function apply(ctx, config) {
     if (!lastUserMessage.text) return null
     if (Date.now() - lastUserMessage.at > 5 * 60_000) return null
     if (sessionId && lastUserMessage.sessionId && sessionId !== lastUserMessage.sessionId) return null
-    const text = lastUserMessage.text.replace(/^\s*\[qq\]\s*/i, '').trim()
-    if (!text) return null
+    const text = stripInjected(lastUserMessage.text.replace(/^\s*\[qq\]\s*/i, ''))
+    if (!looksLikeAnswer(text)) return null
     if (text === cfg.startPrompt || text === cfg.continuePrompt) return null
     if (STOP_WORDS.test(text) || CONTROL_ANSWER.test(text)) return null
     return text
@@ -1400,12 +1412,16 @@ export function apply(ctx, config) {
         const quality = cfg.verifyAnswers ? answerQuality(answerText, word) : 'full'
         if (quality === 'none') {
           verdict = 'wrong'
-          state.lastConflict = {
+          const conflict = {
             word: key,
             at: Date.now(),
             answer: answerText.slice(0, 80),
             expected: [word.meaning, ...(word.meanings || [])].filter(Boolean).join(' / ').slice(0, 80),
           }
+          state.lastConflict = conflict
+          // Keep a short audit trail: a verdict that keeps overriding the model
+          // is visible in the panel instead of hiding in one field.
+          state.conflicts = [...(Array.isArray(state.conflicts) ? state.conflicts : []), conflict].slice(-20)
         } else if (quality === 'partial') {
           // Only part of the gloss: half-known, and remember the user's own
           // wording so the same phrasing is not punished twice.
@@ -1457,15 +1473,23 @@ export function apply(ctx, config) {
       word.dueAt = now + fuzzyIntervalOf(word, options.fuzzyFactor === 0.35 ? 0.35 : 0.5)
       state.dailyCounters.fuzzy = (state.dailyCounters.fuzzy || 0) + 1
     } else if (verdict === 'correct') {
+      // The interval belongs to the rung the word is on NOW; the ladder only
+      // steps up afterwards. A first ✅ therefore waits ladder[0] (30 min)
+      // instead of jumping straight to three hours, so a word climbs
+      // 30m -> 3h -> 12h -> 2d -> 7d -> 30d one answered question at a time.
       word.correct += 1
-      word.stage = Math.min(word.stage + 1, cfg.ladderMinutes.length - 1)
       word.ease = clampEase(clampEase(word.ease) + 0.05)
       word.dueAt = now + intervalOf(word)
+      word.stage = Math.min(word.stage + 1, cfg.ladderMinutes.length - 1)
     } else {
       word.errors += 1
       word.lastErrorAt = now
+      // A lapse from a graduated word is counted separately: it is what the
+      // panel shows as "forgotten again".
+      if (word.stage > 0) word.lapses = (word.lapses || 0) + 1
       word.stage = 0
       word.ease = clampEase(clampEase(word.ease) - 0.15)
+      // A mistake is followed by a short retry, never by a ladder rung.
       word.dueAt = now + Math.round(cfg.retryDelayMinutes * 60_000)
       state.dailyCounters.errors = (state.dailyCounters.errors || 0) + 1
     }
@@ -1554,6 +1578,7 @@ export function apply(ctx, config) {
         correct: 0,
         errors: 0,
         fuzzy: 0,
+        lapses: 0,
         source: article ? 'article' : 'list',
       }
     }
@@ -1702,7 +1727,7 @@ export function apply(ctx, config) {
     'Output protocol — follow it strictly, with no explanations, encouragement, tables, or extra lines:',
     '1. The injected context lists QUEUE (its first word is the current question) and DUE. Ask one word per turn, exactly one line: `Q: {word}`. Always use the FIRST word of QUEUE.',
     '2. When the user replies to your `Q:` line with an answer, judge it and reply with exactly one line, choosing exactly one of three gradings: `✅ {word} = {meaning}` (correct), `🤔 {word} = {meaning}` (right, but the user hedged/asked back/only gave part of the meaning), `❌ {word} = {meaning}` (wrong, "不知道", or no answer). Keep the meaning short (Chinese is fine). Never add anything after that line.',
-    '2a. The plugin re-checks every ✅ against the meaning it stored; a different meaning is scheduled as wrong even if you accepted it. Grade strictly, do not be encouraging.',
+    '2a. When the user typed a short answer, the plugin re-checks every ✅ against the meaning it stored; a different meaning is scheduled as wrong even if you accepted it. Grade strictly, do not be encouraging.',
     '3. The plugin then sends the continuation "继续复习" automatically. On that continuation your next message must be the next question `Q: {word}` — it is not an answer to grade.',
     '4. The plugin records and schedules everything. Never calculate due words, error counts, quota, or scheduling yourself; use only the injected QUEUE.',
     '5. If the user asks to stop, call vocab_stop. Stop is handled by the plugin, not by you.',
@@ -1715,7 +1740,7 @@ export function apply(ctx, config) {
     'The plugin sends every `Q: {word}` line to QQ directly. Follow this strictly:',
     '1. Never print a `Q:` line on your own — except when a tool result explicitly says "Ask only the first word now: Q: {word}". In that single case reply with exactly that one line.',
     '2. A user message that starts with `[QQ]` is the user answering the pending word — the injected PENDING/QUEUE-first word. Judge it and reply with exactly one line, choosing exactly one of three gradings: `✅ {word} = {meaning}` (correct), `🤔 {word} = {meaning}` (right, but the user hedged/asked back/only gave part of the meaning), `❌ {word} = {meaning}` (wrong, "不知道", or no answer). Keep the meaning short (Chinese is fine). The QQ bot relays this line to the user — add nothing else.',
-    '2a. The plugin re-checks every ✅ against the meaning it stored; a different meaning is scheduled as wrong even if you accepted it. Grade strictly, do not be encouraging.',
+    '2a. When the user typed a short answer, the plugin re-checks every ✅ against the meaning it stored; a different meaning is scheduled as wrong even if you accepted it. Grade strictly, do not be encouraging.',
     '3. If that message is clearly not an answer (e.g. 开始/继续/停止/统计 or a pasted word list), use the matching tool instead: vocab_start, vocab_stop, vocab_stats, vocab_import.',
     '4. The plugin records answers and schedules the next question; never calculate due words, quota, or timing yourself. The next `Q:` line arrives from the plugin.',
     '5. Keep replies to QQ short: one line unless a tool result asks otherwise.',
@@ -2060,6 +2085,10 @@ export function apply(ctx, config) {
           if (result.error === 'quota') {
             return { ok: false, message: `${result.quota && result.quota.message ? result.quota.message : '今日已达上限'}. Queue kept: ${result.queue.join(', ')}` }
           }
+          if (result.error === 'no-due') {
+            const next = Number.isFinite(result.nextDueAt) ? ` The next word is due at ${clockText(result.nextDueAt)}.` : ''
+            return { ok: false, message: `Nothing is due right now — every word is scheduled in the future.${next}` }
+          }
           return { ok: false, message: 'There are no words in the review ledger yet. Upload a worksheet image and call vocab_import, or an article image and call vocab_import_article.' }
         }
         const routed = routedSessionId()
@@ -2341,6 +2370,7 @@ export function apply(ctx, config) {
       weakWords,
       verifyAnswers: cfg.verifyAnswers,
       lastConflict: state.lastConflict || null,
+      conflicts: Array.isArray(state.conflicts) ? state.conflicts.slice(-5) : [],
       counters: { ...state.dailyCounters },
       history: Array.isArray(state.history) ? state.history.slice(-14) : [],
       lastImport: state.lastImport || null,
@@ -2354,6 +2384,9 @@ export function apply(ctx, config) {
         verifyAnswers: cfg.verifyAnswers,
         examLevel: cfg.examLevel,
         articleMaxWords: cfg.articleMaxWords,
+        ladder: cfg.ladderMinutes.slice(),
+        retryDelayMinutes: cfg.retryDelayMinutes,
+        lapses: all.reduce((sum, word) => sum + (word.lapses || 0), 0),
       },
       settings: {
         dailyNewLimit: settings.dailyNewLimit,
@@ -2452,6 +2485,40 @@ export function apply(ctx, config) {
       advanceAfterAnswer(state.activeSessionId || routedSessionId() || '', '')
     }
     return { ok: true, word: word.word, op }
+  }
+
+  // ── Progress reset ───────────────────────────────────────────────────────
+  // A ledger can carry a wrong history (a build that mis-graded ✅ answers, a
+  // trial run, a changed exam list). This clears the scheduling fields only:
+  // the words and their glosses stay, every word becomes due again today.
+  function resetProgress() {
+    const now = Date.now()
+    let count = 0
+    for (const word of entries()) {
+      word.stage = 0
+      word.ease = 1
+      word.errors = 0
+      word.fuzzy = 0
+      word.correct = 0
+      word.lapses = 0
+      word.lastAskedAt = null
+      word.lastResultAt = null
+      word.lastErrorAt = null
+      word.lastFuzzyAt = null
+      word.dueAt = now
+      count += 1
+    }
+    state.queue = []
+    state.pendingWord = null
+    state.pendingCounted = false
+    state.lastConflict = null
+    state.conflicts = []
+    state.dailyCounters = freshCounters()
+    state.loop = 'stopped'
+    state.idleReason = null
+    markTick()
+    saveLedger()
+    return { ok: true, words: count }
   }
 
   function csvCell(value) {
@@ -2632,7 +2699,14 @@ export function apply(ctx, config) {
               }
               writeJson(res, 200, {
                 ok: false,
-                error: { code: result.error, message: 'Upload a worksheet image first so the ledger has words.' },
+                error: {
+                  code: result.error,
+                  message:
+                    result.error === 'no-due'
+                      ? `今天到期的单词都复习完了${Number.isFinite(result.nextDueAt) ? `，下一个 ${clockText(result.nextDueAt)} 到期` : ''}。`
+                      : 'Upload a worksheet image first so the ledger has words.',
+                },
+                value: await stateWithSessions(),
               })
               return
             }
@@ -2815,6 +2889,19 @@ export function apply(ctx, config) {
                 quota: result.quota || null,
               },
             })
+            return
+          }
+          if (req.method === 'POST' && action === 'words/reset') {
+            const body = await readJsonBody(req)
+            if (!body || body.confirm !== true) {
+              writeJson(res, 200, {
+                ok: false,
+                error: { code: 'confirm-required', message: 'Send {"confirm":true} to reset the review progress.' },
+              })
+              return
+            }
+            const result = resetProgress()
+            writeJson(res, 200, { ok: true, value: { ...(await stateWithSessions()), reset: result } })
             return
           }
           if (req.method === 'POST' && (action === 'words/master' || action === 'words/forget' || action === 'words/remove')) {

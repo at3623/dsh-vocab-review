@@ -637,7 +637,11 @@ await settle()
 halfLedger = loadLedger(halfDir)
 assert.equal(halfLedger.words.benefit.correct, 1)
 assert.equal(halfLedger.words.benefit.stage, 1, 'a matching ✅ advances the ladder after a fuzzy')
-assert.ok(halfLedger.words.benefit.dueAt > Date.now() + 60 * 60_000)
+const firstGap = halfLedger.words.benefit.dueAt - Date.now()
+assert.ok(
+  firstGap > 20 * 60_000 && firstGap < 40 * 60_000,
+  `a first ✅ waits the 30m rung, got ${Math.round(firstGap / 60_000)}m`,
+)
 assert.equal(halfLedger.lastConflict, null, 'a matching answer never creates a veto')
 console.log('PASS half-step: 🤔 is recorded as fuzzy, the following matching ✅ advances the ladder')
 
@@ -849,7 +853,7 @@ await settle()
 easeLedger = loadLedger(easeDir)
 assert.equal(easeLedger.words.abandon.ease, 0.9, 'a correct answer raises ease by 0.05')
 const easeDueIn = easeLedger.words.abandon.dueAt - Date.now()
-assert.ok(easeDueIn > 155 * 60_000 && easeDueIn < 170 * 60_000, `3h tallered by ease 0.9, got ${Math.round(easeDueIn / 60_000)}m`)
+assert.ok(easeDueIn > 25 * 60_000 && easeDueIn < 30 * 60_000, `the 30m rung scaled by ease 0.9, got ${Math.round(easeDueIn / 60_000)}m`)
 console.log('PASS ease: wrong answers shrink intervals, correct answers stretch them, clamped 0.7-1.5')
 
 // ── 26. Export formats: CSV, JSON, Anki TSV ──────────────────────────────
@@ -985,6 +989,109 @@ const allowed = await callRoute(guardEnv, 'GET', '/api/dsh-vocab-review/state')
 assert.equal(allowed.status, 200, 'a trusted request still works')
 assert.equal(allowed.body.ok, true)
 console.log('PASS access check: routes honour the connection trust fence and pass trusted requests')
+
+// ── 33. The schedule is a curve: ✅ climbs the ladder, ❌ is a short retry ─
+const curveDir = join(root, 'curve')
+const curveSeed = freshEnv(curveDir)
+await curveSeed.tools.get('vocab_import').execute({ words: 'gamma' }, { agent: curveSeed.agent })
+// Answer once, then force the word due again so the next answer arrives without
+// waiting for the real interval.
+async function answerCurve(dir, grade) {
+  const answerEnv = freshEnv(dir)
+  await post(answerEnv, 'start')
+  fireUser(answerEnv, 'm')
+  fire(answerEnv, answerText(grade))
+  await settle()
+  const ledgerAfter = loadLedger(dir)
+  const word = ledgerAfter.words.gamma
+  const gapMin = Math.round((word.dueAt - word.lastResultAt) / 60_000)
+  // Re-arm for the next step: due now, and old enough to pass the 1.5s
+  // duplicate-answer guard.
+  ledgerAfter.words.gamma.dueAt = Date.now() - 1_000
+  ledgerAfter.words.gamma.lastResultAt = Date.now() - 6_000
+  writeFileSync(join(dir, 'ledger.json'), JSON.stringify(ledgerAfter))
+  return { word, gapMin, ledgerAfter }
+}
+const rung1 = await answerCurve(curveDir, '✅ gamma = m')
+assert.equal(rung1.word.stage, 1, 'the first ✅ moves the word to rung 1')
+assert.ok(rung1.gapMin >= 20 && rung1.gapMin <= 40, `first ✅ waits the 30m rung, got ${rung1.gapMin}m`)
+const rung2 = await answerCurve(curveDir, '✅ gamma = m')
+assert.equal(rung2.word.stage, 2)
+assert.ok(rung2.gapMin >= 150 && rung2.gapMin <= 240, `second ✅ waits the 3h rung, got ${rung2.gapMin}m`)
+const rung3 = await answerCurve(curveDir, '✅ gamma = m')
+assert.equal(rung3.word.stage, 3)
+assert.ok(rung3.gapMin >= 600, `third ✅ waits the 12h rung, got ${rung3.gapMin}m`)
+const lapse = await answerCurve(curveDir, '❌ gamma = m')
+assert.equal(lapse.word.stage, 0, 'a mistake drops the word to the bottom rung')
+assert.equal(lapse.word.lapses, 1, 'a lapse from a graduated word is counted')
+assert.ok(lapse.gapMin >= 4 && lapse.gapMin <= 6, `a mistake retries after 5m, got ${lapse.gapMin}m`)
+assert.ok(lapse.gapMin < rung1.gapMin, 'a mistake comes back sooner than a correct answer')
+console.log('PASS curve: ✅ waits 30m→3h→12h, ❌ retries after 5m from the bottom rung')
+
+// ── 34. Nothing is asked before it is due ────────────────────────────────
+const earlyDir = join(root, 'early')
+const earlyEnv = freshEnv(earlyDir)
+await earlyEnv.tools.get('vocab_import').execute({ words: 'one' }, { agent: earlyEnv.agent })
+fireUser(earlyEnv, 'm')
+fire(earlyEnv, answerText('✅ one = m'))
+await settle()
+const earlyState = await state(earlyEnv)
+assert.equal(earlyState.queue.includes('one'), false, 'the answered word leaves the queue')
+assert.equal(earlyState.loop, 'idle')
+const earlyRestart = await post(freshEnv(earlyDir), 'start')
+assert.equal(earlyRestart.ok, false, 'Start has nothing to ask while the word is still in the future')
+const earlyLedger = loadLedger(earlyDir)
+assert.equal(earlyLedger.loop, 'idle')
+assert.equal(earlyLedger.idleReason.kind, 'no-due')
+console.log('PASS spacing: Start never pulls a word forward before its dueAt')
+
+// ── 35. DSH reminder boilerplate must not veto a correct answer ──────────
+const noiseDir = join(root, 'reminder-answer')
+const noiseEnv = freshEnv(noiseDir)
+await noiseEnv.tools.get('vocab_import').execute({ words: 'abandon' }, { agent: noiseEnv.agent })
+fireUser(
+  noiseEnv,
+  '放弃\n\n<system-reminder>\nThe following information describes your current session. Time: 2026-11-23.\n</system-reminder>',
+)
+fire(noiseEnv, answerText('✅ abandon = 放弃'))
+await settle()
+const noiseLedger = loadLedger(noiseDir)
+assert.equal(noiseLedger.words.abandon.correct, 1, 'reminder boilerplate is stripped before the veto check')
+assert.equal(noiseLedger.words.abandon.errors, 0, 'a correct answer with a reminder attached is not wrong')
+assert.equal(noiseLedger.lastConflict, null, 'no conflict is recorded for reminder noise')
+// A reminder-only turn must not erase the answer typed just before it.
+const noiseLedger2 = loadLedger(noiseDir)
+noiseLedger2.words.abandon.dueAt = Date.now() - 1_000
+noiseLedger2.words.abandon.lastResultAt = Date.now() - 6_000
+writeFileSync(join(noiseDir, 'ledger.json'), JSON.stringify(noiseLedger2))
+const noiseEnv2 = freshEnv(noiseDir)
+await post(noiseEnv2, 'start')
+fireUser(noiseEnv2, '放弃')
+fireUser(noiseEnv2, '<system-reminder>File policy: danger-full-access.</system-reminder>')
+fire(noiseEnv2, answerText('✅ abandon = 放弃'))
+await settle()
+assert.equal(loadLedger(noiseDir).words.abandon.correct, 2, 'a reminder-only turn keeps the earlier typed answer')
+console.log('PASS answer capture: system-reminder text is stripped, correct answers are never vetoed by it')
+
+// ── 36. Reset progress: confirm required, glosses kept, all due again ────
+const resetEnv = freshEnv(curveDir)
+const resetRefused = await post(resetEnv, 'words/reset', {})
+assert.equal(resetRefused.ok, false, 'reset needs an explicit confirmation')
+assert.equal(resetRefused.error.code, 'confirm-required')
+const resetBody = await post(resetEnv, 'words/reset', { confirm: true })
+assert.equal(resetBody.ok, true)
+assert.ok(resetBody.value.reset.words >= 1)
+const resetLedger = loadLedger(curveDir)
+const gammaAfterReset = resetLedger.words.gamma
+assert.equal(gammaAfterReset.errors, 0)
+assert.equal(gammaAfterReset.fuzzy, 0)
+assert.equal(gammaAfterReset.stage, 0)
+assert.equal(gammaAfterReset.ease, 1)
+assert.equal(gammaAfterReset.lapses, 0)
+assert.equal(gammaAfterReset.meaning, 'm', 'the stored gloss survives a reset')
+assert.ok(gammaAfterReset.dueAt <= Date.now() + 1_000, 'every word is due again after a reset')
+assert.deepEqual(resetLedger.queue, [])
+console.log('PASS reset: confirmed reset clears the schedule, keeps the glosses, re-dates every word')
 
 rmSync(root, { recursive: true, force: true })
 console.log('\nALL CHECKS PASSED')

@@ -73,6 +73,10 @@ window.__ModuleLoader__.load({
       qqSending: 'Sending…',
       idleDone: 'All due words reviewed',
       nextDue: 'next due',
+      noDueNow: 'Nothing is due right now',
+      resetProgress: 'Reset progress',
+      resetConfirm:
+        'Reset the review progress of every word? Glosses are kept; wrong/half counts, the ladder, ease and due dates are cleared and every word becomes due today.',
       autoContinue: 'The loop keeps asking while words are due; it stops only when every due word is done or a daily limit is hit.',
       weakWords: 'Weak words',
       weakHint: 'Words you failed or only half knew, hardest first.',
@@ -171,6 +175,10 @@ window.__ModuleLoader__.load({
       qqSending: '发送中…',
       idleDone: '今天到期的单词都已复习完',
       nextDue: '下一个到期',
+      noDueNow: '现在没有到期的单词',
+      resetProgress: '重置复习进度',
+      resetConfirm:
+        '重置所有单词的复习进度？词义会保留，错误/模糊次数、阶梯、难度和到期时间清零，所有词回到今天到期。',
       autoContinue: '只要还有到期的单词就会自动继续；全部复习完或达到每日上限时才停。',
       weakWords: '薄弱词',
       weakHint: '答错过或只记得一半的词，按错次排序。',
@@ -521,6 +529,11 @@ window.__ModuleLoader__.load({
           .catch((cause) => {
             const code = cause && cause.code
             if (cause && cause.value) publish(cause.value)
+            if (code === 'no-due') {
+              const next = cause.value && Number.isFinite(cause.value.nextDueAt) ? ` · ${t('nextDue')} ${clockText(cause.value.nextDueAt)}` : ''
+              setActionError(`${t('noDueNow')}${next}`)
+              return
+            }
             setActionError(code === 'no-session' ? t('noSession') : code === 'no-words' ? t('empty') : String(cause && cause.message ? cause.message : cause))
           })
           .finally(() => setBusy(false))
@@ -652,6 +665,23 @@ window.__ModuleLoader__.load({
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ word }),
+        })
+          .then(publish)
+          .catch((cause) => setActionError(String(cause && cause.message ? cause.message : cause)))
+          .finally(() => setWordBusy(''))
+      }
+
+      // Whole-ledger operation: clear the wrong history but keep the words, so
+      // a corrupted schedule can be repaired without a new worksheet.
+      const resetProgress = () => {
+        if (wordBusy) return
+        if (typeof window !== 'undefined' && typeof window.confirm === 'function' && !window.confirm(t('resetConfirm'))) return
+        setWordBusy('reset')
+        setActionError('')
+        api('words/reset', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ confirm: true }),
         })
           .then(publish)
           .catch((cause) => setActionError(String(cause && cause.message ? cause.message : cause)))
@@ -1049,6 +1079,15 @@ window.__ModuleLoader__.load({
                     'div',
                     null,
                     `${t('diagExam')}: ${String(diag.examLevel || '').toUpperCase()} · ${t('diagVerify')}: ${diag.verifyAnswers ? 'on' : 'off'}`,
+                  ),
+                  h(
+                    'div',
+                    { className: 'vr-save-row' },
+                    h(
+                      'button',
+                      { className: 'vr-mini', type: 'button', onClick: resetProgress, disabled: Boolean(wordBusy) },
+                      t('resetProgress'),
+                    ),
                   ),
                 ),
               )
