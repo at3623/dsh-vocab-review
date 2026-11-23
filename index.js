@@ -788,6 +788,9 @@ export function apply(ctx, config) {
       error: status ? status.error : '',
       connectedAt: status ? status.connectedAt : null,
       lastMessageAt: status ? status.lastMessageAt : null,
+      attempt: status ? status.attempt : 0,
+      nextRetryAt: status ? status.nextRetryAt : null,
+      rateLimitedUntil: status ? status.rateLimitedUntil : null,
       panel: status ? status.panel : null,
       target: state.qqTarget ? { scope: state.qqTarget.scope, at: state.qqTarget.at } : null,
     }
@@ -2646,7 +2649,9 @@ export function apply(ctx, config) {
     }
     if (body && typeof body.qqBuiltinEnabled === 'boolean') {
       next.qqBuiltinEnabled = body.qqBuiltinEnabled
-      qqChanged = true
+      // Saving the same settings again must not bounce the gateway: every
+      // reconnect costs a token + gateway API call against QQ's rate limit.
+      if (body.qqBuiltinEnabled !== settings.qqBuiltinEnabled) qqChanged = true
     }
     settings = next
     saveSettings()

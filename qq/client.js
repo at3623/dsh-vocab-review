@@ -18,6 +18,73 @@ const MAX_CHUNKS = 4
 const MAX_CHUNK_CHARS = 900
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024
 const HANDSHAKE_TIMEOUT_MS = 30_000
+// Reconnect pacing. QQ's open-platform endpoints are rate limited (HTTP 400,
+// code 100017 / err_code 40023001 "接口调用超过频率限制"), and a tight retry loop
+// makes it worse: the first failure after a long gap already waits 5s, doubles
+// to 5min, and a rate-limit answer parks the client for at least a minute.
+const RECONNECT_BASE_MS = 5_000
+const RECONNECT_MAX_MS = 300_000
+const RATE_LIMIT_BASE_MS = 60_000
+const RATE_LIMIT_MAX_MS = 900_000
+// The gateway URL is stable for minutes; a socket drop must not refetch it
+// (each refetch is another rate-limited API call). Reconnects inside this
+// window reuse it, only a rejected session drops the cache.
+const GATEWAY_TTL_MS = 5 * 60_000
+// Shared by every client instance in this process: a restart (panel save,
+// plugin reload) inside a rate-limit cooldown must not fire another request.
+let sharedCooldownUntil = 0
+// Close codes that mean "this gateway URL / session is no longer good".
+const INVALID_SESSION_CODES = new Set([4004, 4006, 4007, 4008, 4909, 4914, 4915])
+
+function parseJson(text) {
+  try {
+    const value = JSON.parse(text)
+    return value && typeof value === 'object' ? value : null
+  } catch {
+    return null
+  }
+}
+
+/** Detail of a rate-limit answer, or null when this response is something else. */
+function rateLimitOf(response, text) {
+  const body = parseJson(text) || {}
+  const code = Number(body.code) || 0
+  const errCode = Number(body.err_code !== undefined ? body.err_code : body.errCode) || 0
+  const message = String(body.message || '')
+  const limited =
+    response.status === 429 ||
+    code === 100017 ||
+    errCode === 40023001 ||
+    /频率限制|rate.?limit|too many requests/i.test(message)
+  if (!limited) return null
+  let retryAfterMs = 0
+  try {
+    const header = response.headers && typeof response.headers.get === 'function' ? response.headers.get('retry-after') : null
+    const seconds = Number(header)
+    if (Number.isFinite(seconds) && seconds > 0) retryAfterMs = seconds * 1000
+  } catch {
+    retryAfterMs = 0
+  }
+  return { retryAfterMs, code, errCode, message }
+}
+
+/** An HTTP failure with the fields the reconnect logic needs. */
+function httpError(prefix, response, text) {
+  const limited = rateLimitOf(response, text)
+  const body = parseJson(text) || {}
+  const detail = limited
+    ? `接口调用超过频率限制${limited.message ? `：${limited.message}` : ''}`
+    : `${response.status} ${text.slice(0, 160)}`.trim()
+  const error = new Error(`${prefix}：HTTP ${detail}`)
+  error.status = response.status
+  error.code = limited ? limited.code : Number(body.code) || 0
+  error.errCode = limited ? limited.errCode : Number(body.err_code) || 0
+  error.rateLimited = Boolean(limited)
+  error.retryAfterMs = limited ? limited.retryAfterMs : 0
+  error.auth = !limited && (response.status === 401 || response.status === 403)
+  return error
+}
+
 // QQ 快捷指令面板 (the list the QQ client shows when the user types "/").
 // Platform limits: at most 5 items, and a CJK character counts as two of the
 // documented name/description characters.
@@ -65,8 +132,13 @@ export class QqClient {
     this.reconnectTimer = null
     this.handshakeTimer = null
     this.attempt = 0
+    this.rateLimitedCount = 0
     this.closed = false
     this.helloDone = false
+    this.gatewayCache = null
+    this.gatewayCachedAt = 0
+    this.cooldownUntil = 0
+    this.nextRetryAt = null
     this.state = 'idle'
     this.error = ''
     this.connectedAt = null
@@ -86,6 +158,9 @@ export class QqClient {
       connectedAt: this.connectedAt,
       lastMessageAt: this.lastMessageAt,
       apiBase: this.apiBase,
+      attempt: this.attempt,
+      nextRetryAt: this.nextRetryAt,
+      rateLimitedUntil: this.cooldownUntil > Date.now() ? this.cooldownUntil : null,
       panel: { ...this.panel },
     }
   }
@@ -113,14 +188,40 @@ export class QqClient {
     }
     this.closed = false
     this.attempt = 0
+    const wait = this.cooldownRemaining()
+    if (wait > 0) {
+      this.parkRateLimited(wait)
+      return this.status()
+    }
     await this.open()
     return this.status()
   }
 
+  /** Milliseconds left before a rate-limit cooldown allows the next request. */
+  cooldownRemaining() {
+    return Math.max(0, sharedCooldownUntil - Date.now())
+  }
+
+  /** Wait out a rate limit without touching the network. */
+  parkRateLimited(waitMs) {
+    const seconds = Math.max(1, Math.round(waitMs / 1000))
+    this.cooldownUntil = Math.max(this.cooldownUntil, Date.now() + waitMs)
+    this.setStatus('reconnecting', `QQ 接口调用超过频率限制，已暂停请求，${seconds} 秒后自动重试。`)
+    this.scheduleRetry(waitMs)
+  }
+
   async open() {
+    if (this.closed) return
+    const wait = this.cooldownRemaining()
+    if (wait > 0) {
+      this.parkRateLimited(wait)
+      return
+    }
     this.setStatus('connecting')
     try {
-      const token = await this.accessToken(true)
+      // Cached token + cached gateway on purpose: each of those HTTP calls is
+      // rate-limited, so a reconnect must not repeat them.
+      const token = await this.accessToken()
       const gateway = await this.gatewayUrl(token)
       this.connectSocket(gateway, token)
     } catch (error) {
@@ -129,21 +230,51 @@ export class QqClient {
   }
 
   fail(error) {
-    const message = String((error && error.message) || error)
-    this.logger?.warn?.(`dsh-vocab-review: [qq] ${message}`)
-    this.setStatus('failed', message)
+    const raw = String((error && error.message) || error)
+    this.logger?.warn?.(`dsh-vocab-review: [qq] ${raw}`)
+    if (error && error.rateLimited) {
+      const wait = Math.min(
+        RATE_LIMIT_MAX_MS,
+        Math.max(RATE_LIMIT_BASE_MS, error.retryAfterMs || 0, RATE_LIMIT_BASE_MS * 2 ** Math.min(this.rateLimitedCount, 4)),
+      )
+      this.rateLimitedCount += 1
+      sharedCooldownUntil = Date.now() + wait
+      this.parkRateLimited(wait)
+      return
+    }
+    if (error && error.auth) {
+      // Bad credentials cannot be fixed by retrying: stop and say so.
+      this.setStatus('failed', raw)
+      return
+    }
+    this.setStatus('reconnecting', raw)
+    this.scheduleReconnect()
+  }
+
+  /** A retry whose delay is already decided. */
+  scheduleRetry(delay) {
+    if (this.closed) return
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer)
+    this.nextRetryAt = Date.now() + delay
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null
+      this.nextRetryAt = null
+      void this.open()
+    }, delay)
+    this.reconnectTimer.unref?.()
   }
 
   scheduleReconnect() {
     if (this.closed) return
-    const delay = Math.min(60_000, 1_000 * 2 ** Math.min(this.attempt, 5))
+    const wait = this.cooldownRemaining()
+    if (wait > 0) {
+      this.parkRateLimited(wait)
+      return
+    }
+    const backoff = Math.min(RECONNECT_MAX_MS, RECONNECT_BASE_MS * 2 ** Math.min(this.attempt, 6))
     this.attempt += 1
-    this.setStatus('reconnecting')
-    this.reconnectTimer = setTimeout(() => {
-      this.reconnectTimer = null
-      void this.open()
-    }, delay)
-    this.reconnectTimer.unref?.()
+    this.setStatus('reconnecting', this.error)
+    this.scheduleRetry(backoff + Math.floor(Math.random() * 500))
   }
 
   connectSocket(url, token) {
@@ -204,6 +335,7 @@ export class QqClient {
     }
     const code = event && typeof event.code === 'number' ? event.code : 0
     this.logger?.info?.(`dsh-vocab-review: [qq] gateway closed (${code})`)
+    if (INVALID_SESSION_CODES.has(code)) this.gatewayCache = null
     this.scheduleReconnect()
   }
 
@@ -228,6 +360,9 @@ export class QqClient {
         this.heartbeatTimer = setInterval(() => this.heartbeat(), every)
         this.heartbeatTimer.unref?.()
         this.attempt = 0
+        this.rateLimitedCount = 0
+        this.cooldownUntil = 0
+        sharedCooldownUntil = 0
         this.setStatus('connected')
         break
       }
@@ -338,7 +473,7 @@ export class QqClient {
       body: JSON.stringify({ appId: this.appId, clientSecret: this.appSecret }),
     })
     const text = await response.text()
-    if (!response.ok) throw new Error(`获取 QQ access_token 失败：HTTP ${response.status} ${text.slice(0, 160)}`)
+    if (!response.ok) throw httpError('获取 QQ access_token 失败', response, text)
     let value = null
     try {
       value = JSON.parse(text)
@@ -351,19 +486,32 @@ export class QqClient {
     return this.token
   }
 
-  async gatewayUrl(token) {
+  async gatewayUrl(token, retried = false) {
+    // Reconnects reuse the URL: every /gateway call counts against the
+    // platform's rate limit, which is exactly what a drop-and-retry loop hits.
+    if (!retried && this.gatewayCache && Date.now() - this.gatewayCachedAt < GATEWAY_TTL_MS) {
+      return this.gatewayCache
+    }
     const response = await this.fetchImpl(`${this.apiBase}/gateway`, {
       headers: { authorization: `QQBot ${token}`, 'user-agent': this.userAgent },
     })
     const text = await response.text()
-    if (!response.ok) throw new Error(`获取 QQ 网关地址失败：HTTP ${response.status} ${text.slice(0, 160)}`)
-    let value = null
-    try {
-      value = JSON.parse(text)
-    } catch {
-      value = null
+    if (!response.ok) {
+      const error = httpError('获取 QQ 网关地址失败', response, text)
+      if (error.auth && !retried) {
+        // The cached token was rejected early: refresh it once and retry.
+        this.token = ''
+        this.tokenExpiresAt = 0
+        this.gatewayCache = null
+        const fresh = await this.accessToken(true)
+        return this.gatewayUrl(fresh, true)
+      }
+      throw error
     }
+    const value = parseJson(text)
     if (!value || typeof value.url !== 'string' || !value.url) throw new Error('获取 QQ 网关地址失败：响应缺少 url')
+    this.gatewayCache = value.url
+    this.gatewayCachedAt = Date.now()
     return value.url
   }
 
@@ -383,7 +531,7 @@ export class QqClient {
       this.token = ''
       return this.api(method, path, body, true)
     }
-    if (!response.ok) throw new Error(`QQ API ${path} 失败：HTTP ${response.status} ${text.slice(0, 200)}`)
+    if (!response.ok) throw httpError(`QQ API ${path} 失败`, response, text)
     if (!text) return {}
     try {
       return JSON.parse(text)

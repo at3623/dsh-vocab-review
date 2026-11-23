@@ -257,6 +257,18 @@ dsh plugin --profile <profile> add github:at3623/dsh-vocab-review
    - 到期提醒、自动停下说明也会推到同一个 QQ 聊天。
 4. 面板上的 QQ 行显示「内置 QQ 已连接」；连不上时把错误显示在面板和诊断区。
 
+**限流与自动重连（v2.2.1）**
+
+QQ 开放平台的接口有频率限制，请求太快会返回 `HTTP 400 {"code":100017,"err_code":40023001,"message":"接口调用超过频率限制"}`。旧版本在拿到这个错误后直接停在「连接失败」，再点连接又打一次接口，越试越久。现在：
+
+- **token 与网关地址都缓存**：一次重连不再重新换 token、也不再重复请求 `/gateway`（这两步各算一次限流额度）；只有会话失效（close code 4004/4006/4007/4008/4909/4914/4915）才丢弃缓存的网关地址重新获取；
+- **失败自动重试**：普通失败从 5 秒起指数退避到最多 5 分钟；**限流至少停 60 秒**（逐次 60s → 120s → 240s → 480s → 最多 15 分钟），期间不发任何请求；
+- 面板会显示成「内置 QQ 重连中 · 16:05：QQ 接口调用超过频率限制，已暂停请求，60 秒后自动重试。」，**不需要你手点**，冷却结束后自己连上；
+- 同一份配置重复「保存」不会再重建连接（只有配置真的变了才重连），避免自己把自己的额度刷掉；
+- AppID/AppSecret 无效这类错误（HTTP 401/403）不会无脑重试，直接显示「连接失败：…」，改好凭据再保存。
+
+如果等了十几分钟还是限流，通常是同一个 AppID 还在别处连着（比如 `dsh-qq-bot` 或另一个 DSH 实例），先断开那一边。
+
 **限制与注意事项**
 
 - 同一个 QQ 机器人 AppID **只能有一个网关连接**：内置通道和 `dsh-qq-bot` 不要同时用同一个 AppID（会互相踢下线）。要用两个就建两个机器人应用。
@@ -328,7 +340,7 @@ npm run check     # 语法检查
 ```
 
 - `test/harness.mjs` —— 36 项：导入、✅/❌/🤔 记账、压缩注入、停止/继续、每日限额、面板改限额、每日提醒、跨天清零、重启持久化、QQ 通道、**自动续轮**、QQ 自动停下时推一条说明、**插件否决模型 ✅**、**模糊半档**、**🤔 后正常 ✅ 升档**、**薄弱词本 + 已掌握/重问/删除 + CSV 导出**、**ledger 版本守卫**、**「不知道」一律算错**、**短中文近义半会并记入词义池**、**文章导入（过滤基础词 + 拒收 `:out` 超纲词 + 限流 + 不自动开始）**、**文章导入边界（全是基础词 / 已有词）**、**考试范围（单次指定考试、`:out` 拒收、`examLevel` 默认值）**、**难度因子 ease**、**CSV/JSON/Anki 三种导出**、**每日历史**、**诊断字段与上次导入**、**1500 词性能**、**划线图附带 `extra` 高频词（过滤 + 限量 + 来源标记）**、**`includeHighFreq:false` 只收划线词**、**HTTP 路由的 connection 信任检查**、**阶梯曲线（✅ 30 分钟→3 小时→12 小时、❌ 5 分钟回到第一档并记 lapse）**、**不会提前问到期的词**、**`<system-reminder>` 不再误否决 ✅**、**重置进度（需确认、保留词义）**。
-- `test/qq-builtin.mjs` —— 内置 QQ 的离线联调（假网关 + 假 HTTP）：token→gateway→identify、心跳、入境文字→会话提示→回传、入境图片→图片块、命令「开始背单词」直接推题、答题批改后推下一题、`/start /stats /stop /reset /help` 命令面板、消息去重、断线/禁用状态。
+- `test/qq-builtin.mjs` —— 内置 QQ 的离线联调（假网关 + 假 HTTP）：token→gateway→identify、心跳、入境文字→会话提示→回传、入境图片→图片块、命令「开始背单词」直接推题、答题批改后推下一题、`/start /stats /stop /reset /help` 命令面板、消息去重、断线/禁用状态、**限流后按冷却时间重试而不是猛刷 `/gateway`**、**token 与网关地址缓存复用**、**会话失效丢弃网关缓存**。
 - `test/sessions-stop.mjs` —— 对话列表/选择持久化/路由、强暂停、归档回落。
 - `test/client-load-check.mjs` —— 用 mock loader 跑一遍 Client 半边，确认侧栏与面板注册。
 - `test/locale-check.mjs` —— 校验 `locale/zh.json`、`locale/en.json` 是合法 JSON 且元数据完整（`npm run check` 会跑；之前 en.json 里一处未转义的引号就是靠它发现的）。
@@ -568,6 +580,16 @@ The built-in client uses the official QQ Open Platform protocol with Node's own 
 
 Limits: one QQ bot app can hold only one gateway connection (do not run the built-in client and `dsh-qq-bot` on the same AppID); passive replies are limited to **4 per inbound message** and every reply needs an increasing `msg_seq` (QQ rejects duplicates with `40054005`), which the client handles automatically before falling back to an active push; the AppSecret is plain text in the local `settings.json`; only C2C + group @ text/images (no buttons, no streaming, no multi-chat bindings); if the platform changes permissions or the connection fails, the panel error and the `[qq]` log lines show why.
 
+**Rate limits and automatic reconnects (v2.2.1)** — QQ's open-platform endpoints are rate limited and answer `HTTP 400 {"code":100017,"err_code":40023001,"message":"接口调用超过频率限制"}` when hit too often. The client used to stop at “failed” and try again — and retry — on every click, which made the limit worse. Now:
+
+- the **access token and gateway URL are cached**: a reconnect no longer fetches another token or calls `/gateway` again (both count against the limit); only an invalid session (close codes 4004/4006/4007/4008/4909/4914/4915) drops the cached URL;
+- **failures retry themselves**: ordinary failures back off from 5 s up to 5 min; a rate-limit answer pauses for **at least 60 s** (60 → 120 → 240 → 480 s, capped at 15 min) without sending anything;
+- the panel shows `built-in QQ reconnecting · 16:05: … 60 s until retry`, and it reconnects by itself — no clicks needed;
+- pressing Save again with unchanged settings no longer rebuilds the connection, so the plugin cannot burn its own quota;
+- invalid credentials (HTTP 401/403) are not retried blindly: the panel shows the failure and you fix the AppID/AppSecret.
+
+If it is still limited after ~15 minutes, the same AppID is probably connected somewhere else (`dsh-qq-bot` or another DSH instance) — disconnect that side first.
+
 ### Bridge to `@hualiong/dsh-qq-bot`
 
 If you already run that bot (see “Dependencies & third-party components”), the plugin can use it instead: the panel QQ row shows the bridge state, questions go out through its `send_qq_message` tool, and answers come back from its `[QQ] …` inbound messages. Its **inbound is text-only** (image messages are rejected there), so import images from the Web chat or paste the article text into QQ.
@@ -594,7 +616,7 @@ It is silent: no prompt, no `steer`, no fake transcript message. Afterwards the 
 
 - `npm test` — runs the four offline harnesses below.
 - `node test/harness.mjs` — Host harness: 3-word import, ✅/❌ ledger updates, compact injection, loop Pause (no prompt, queue kept), Start resume without double-counting, `dailyTotalLimit=5`, live settings edits, once-per-day reminder, date rollover, reload persistence, the QQ channel (binding discovery, Start pushes `Q:` through `send_qq_message` without prompting the web session, QQ-graded answer recorded, next question pushed only after that turn ends), continuous review (with `queueSize: 2` the loop still asks all 5 due words, then goes `idle` with a `no-due` reason), the QQ idle note, **the plugin veto (a model `✅` with a different meaning is scheduled as wrong)**, **the fuzzy half-step**, **a fuzzy followed by a matching ✅ advancing the ladder**, **the weak-word book plus Known/Ask again/Remove and the CSV export**, **the ledger schema guard**, **"不知道" being wrong even when the model says `✅`**, **a half-matched rewording graded half-known and joining the gloss pool**, **the article import (basic words filtered, `:out` refused, batch capped, loop waiting for Start, protocol updated)**, **the article edge cases (all-basic list, already-known words)**, **the exam scope (per-call exam level, `:out` refusal, `examLevel` as the default)**, **the ease factor**, **CSV/JSON/Anki exports**, **the daily history**, **diagnostics + last import**, **the 1500-word performance check**, **exam high-frequency `extra` words on a worksheet import (filtered, capped, source `exam`)**, **`includeHighFreq: false` importing underlined words only**, and **the connection trust fence on the HTTP routes**, **the ladder curve (✅ 30m → 3h → 12h, ❌ retried after 5m from the bottom rung plus a lapse count)**, **Start never pulling a word forward before its `dueAt`**, **`<system-reminder>` no longer vetoing a correct `✅`**, and **reset progress (confirmation required, glosses kept)**.
-- `node test/qq-builtin.mjs` — offline built-in QQ test with a fake gateway and fake HTTP: token → gateway → identify, heartbeat, inbound text → session prompt → relay, inbound image → image prompt block, 开始背单词 pushing `Q:` directly, grading round trip + next question, message deduplication, disconnect/disable status.
+- `node test/qq-builtin.mjs` — offline built-in QQ test with a fake gateway and fake HTTP: token → gateway → identify, heartbeat, inbound text → session prompt → relay, inbound image → image prompt block, 开始背单词 pushing `Q:` directly, grading round trip + next question, the `/start /stats /stop /reset /help` command panel, message deduplication, disconnect/disable status, **rate-limit parking with a retry time instead of hammering `/gateway`**, **cached token + gateway URL on reconnect**, and **an invalid session dropping the gateway cache**.
 - `node test/sessions-stop.mjs` — conversation list (titles, archived/subagent excluded), selection persisted in `settings.json` + reload, Start routed to the selected session, strong-pause Stop (cancel + jobs/terminals/subagents, silent, `turnInFlight` false), idle Stop no-op, archived-selection fallback.
 - `node test/client-load-check.mjs` — evaluates the Client bundle with a mocked module loader and asserts the sidebar/main registrations.
 - `node test/locale-check.mjs` — validates that `locale/zh.json` and `locale/en.json` are valid JSON with complete metadata (run by `npm run check`; it is what caught an unescaped quote in `en.json`).

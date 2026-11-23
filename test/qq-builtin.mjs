@@ -53,6 +53,10 @@ class FakeWs {
 // ── Fake HTTP ─────────────────────────────────────────────────────────────
 const sentMessages = []
 const panels = []
+const httpCalls = { token: 0, gateway: 0 }
+// When set, /gateway answers the QQ rate-limit error (400 / code 100017 /
+// err_code 40023001) so the retry policy can be tested offline.
+let gatewayRateLimitUntil = 0
 function response({ status = 200, body = null, mediaType = 'application/json', bytes = null }) {
   const text = bytes ? '' : JSON.stringify(body ?? {})
   return {
@@ -68,8 +72,17 @@ async function fakeFetch(url, init = {}) {
   const target = String(url)
   const pathname = target.split('?')[0]
   const method = String(init.method || 'GET').toUpperCase()
-  if (target.includes('/app/getAppAccessToken')) return response({ body: { access_token: 'TOKEN-1', expires_in: 7200 } })
-  if (pathname.endsWith('/gateway')) return response({ body: { url: 'wss://gateway.test/websocket' } })
+  if (target.includes('/app/getAppAccessToken')) {
+    httpCalls.token += 1
+    return response({ body: { access_token: 'TOKEN-1', expires_in: 7200 } })
+  }
+  if (pathname.endsWith('/gateway')) {
+    httpCalls.gateway += 1
+    if (Date.now() < gatewayRateLimitUntil) {
+      return response({ status: 400, body: { message: '接口调用超过频率限制', code: 100017, err_code: 40023001 } })
+    }
+    return response({ body: { url: 'wss://gateway.test/websocket' } })
+  }
   if (pathname.endsWith('/v2/panels') && method === 'GET') return response({ body: { records: panels } })
   if (pathname.endsWith('/v2/panels') && method === 'POST') {
     const body = JSON.parse(init.body)
@@ -427,6 +440,57 @@ const fifth = sentMessages.filter((message) => message.url.includes('OPENID_SEQ'
 assert.equal(fifth.msg_id, undefined, 'after the 4-reply budget it falls back to an active push')
 assert.equal(fifth.msg_seq, 1)
 console.log('PASS builtin QQ: msg_seq increments per inbound msg_id and falls back to a push after 4 replies')
+
+// ── 9. QQ rate limit: park with a retry time instead of hammering /gateway ─
+gatewayRateLimitUntil = Date.now() + 60_000
+const rlClient = new QqClient({
+  appId: 'a',
+  appSecret: 'b',
+  apiBase: 'https://api.test',
+  fetchImpl: fakeFetch,
+  WebSocketImpl: FakeWs,
+})
+const gatewayCallsBefore = httpCalls.gateway
+const tokenCallsBefore = httpCalls.token
+const rlStatus = await rlClient.start()
+assert.equal(rlStatus.state, 'reconnecting')
+assert.match(rlStatus.error, /频率限制/u, 'the raw QQ rate-limit answer becomes a readable message')
+assert.ok(rlStatus.nextRetryAt > Date.now(), 'a retry is scheduled')
+assert.equal(httpCalls.gateway, gatewayCallsBefore + 1, 'exactly one /gateway call before parking')
+const secondStart = await rlClient.start()
+assert.equal(httpCalls.gateway, gatewayCallsBefore + 1, 'a second start inside the cooldown does not call /gateway')
+assert.equal(httpCalls.token, tokenCallsBefore + 1, 'and does not fetch another access token either')
+assert.equal(secondStart.state, 'reconnecting')
+await rlClient.close()
+gatewayRateLimitUntil = 0
+console.log('PASS builtin QQ: a rate-limit answer parks the client with a retry time instead of hammering the API')
+
+// ── 10. Token + gateway URL are cached across reconnects ─────────────────
+const cacheClient = new QqClient({
+  appId: 'a',
+  appSecret: 'b',
+  apiBase: 'https://api.test',
+  fetchImpl: fakeFetch,
+  WebSocketImpl: FakeWs,
+})
+const tokenBefore = httpCalls.token
+const gatewayBefore = httpCalls.gateway
+const tokenA = await cacheClient.accessToken()
+const tokenB = await cacheClient.accessToken()
+assert.equal(httpCalls.token, tokenBefore + 1, 'the access token is reused until it expires')
+const gatewayA = await cacheClient.gatewayUrl(tokenA)
+const gatewayB = await cacheClient.gatewayUrl(tokenB)
+assert.equal(httpCalls.gateway, gatewayBefore + 1, 'the gateway URL is reused for reconnects')
+assert.equal(gatewayA, gatewayB)
+console.log('PASS builtin QQ: a reconnect reuses the cached access token and gateway URL')
+
+// ── 11. An invalid session drops the cached gateway URL ──────────────────
+cacheClient.gatewayCache = 'wss://stale.test/websocket'
+cacheClient.onSocketClose({ code: 4914 })
+assert.equal(cacheClient.gatewayCache, null, 'close code 4914 invalidates the cached gateway URL')
+assert.equal(cacheClient.state, 'reconnecting')
+await cacheClient.close()
+console.log('PASS builtin QQ: an invalid session drops the gateway cache so the next attempt refetches it')
 
 rmSync(root, { recursive: true, force: true })
 console.log('\nALL QQ CHECKS PASSED')

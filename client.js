@@ -478,7 +478,10 @@ window.__ModuleLoader__.load({
       if (builtin && builtin.configured) {
         if (builtin.state === 'connected') return t('qqConnected')
         if (builtin.state === 'connecting') return t('qqConnecting')
-        if (builtin.state === 'reconnecting') return t('qqReconnecting')
+        if (builtin.state === 'reconnecting') {
+          const retry = Number.isFinite(builtin.nextRetryAt) ? ` · ${clockText(builtin.nextRetryAt)}` : ''
+          return `${t('qqReconnecting')}${retry}${builtin.error ? `：${builtin.error}` : ''}`
+        }
         if (builtin.state === 'failed') return `${t('qqFailed')}${builtin.error ? `：${builtin.error}` : ''}`
         return t('qqOff')
       }
