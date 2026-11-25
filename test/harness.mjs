@@ -1166,5 +1166,17 @@ assert.equal(queuedNew.length, 2, 'two slots are reserved for never-asked words'
 assert.equal(queuedReviews.length, 2, 'the rest of the batch is due reviews')
 console.log('PASS interleaving: a review backlog no longer starves the never-asked words')
 
+// ── 39. Ladder config: legacy default upgraded, explicit custom kept ────
+const legacyDir = join(root, 'legacy-ladder')
+const legacyState = await state(freshEnv(legacyDir, { ladderMinutes: [30, 180, 720, 2880, 10080, 43200] }))
+assert.deepEqual(
+  legacyState.diag.ladder,
+  [10, 1440, 4320, 10080, 20160, 43200],
+  'a config still carrying the v2.2 default is upgraded to the v2.3 curve',
+)
+const customState = await state(freshEnv(join(root, 'custom-ladder'), { ladderMinutes: [60, 120] }))
+assert.deepEqual(customState.diag.ladder, [60, 120], 'a custom ladder is kept as-is')
+console.log('PASS ladder config: the legacy default is upgraded, explicit custom values are kept')
+
 rmSync(root, { recursive: true, force: true })
 console.log('\nALL CHECKS PASSED')
