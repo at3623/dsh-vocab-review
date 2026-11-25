@@ -31,6 +31,16 @@
 # gaokao | cet4 | cet6 | kaoyan | any (default CET-4). The user can override it
 # per import by naming the exam (高考/四级/六级/考研).
 #
+# ladderMinutes (v2.3.0): days-based memory curve — 10m, 1d, 3d, 7d, 14d, 30d.
+# A ✅ earns the interval of the rung the word is on and then steps up; a clean
+# first try skips the 10-minute consolidation rung. A ❌ is not a rung: it drops
+# the word to rung 0 and re-asks it after retryDelayMinutes.
+#
+# newWordsPerBatch: slots reserved for never-asked words in every batch, so a
+# backlog of due reviews cannot keep the same handful of words in rotation.
+# maxRepsPerDay: hard ceiling per word per day; after it the word waits for the
+# next morning instead of being drilled again.
+#
 # The optional QQ channel has two transports:
 # 1. built-in (default when configured in the panel): this plugin connects to the
 #    QQ 开放平台 itself with an AppID / AppSecret, no third-party plugin. The
@@ -47,6 +57,8 @@
       config:
         queueSize: 5
         autoContinue: true
+        newWordsPerBatch: 2
+        maxRepsPerDay: 3
         wrongInject: 2
         retryDelayMinutes: 5
         verifyAnswers: true
@@ -54,7 +66,7 @@
         includeHighFreq: true
         examLevel: cet4
         qqApiBase: https://api.sgroup.qq.com
-        ladderMinutes: [30, 180, 720, 2880, 10080, 43200]
+        ladderMinutes: [10, 1440, 4320, 10080, 20160, 43200]
         highMultiplier: 0.7
         lowMultiplier: 1.6
         maxRecentErrors: 5

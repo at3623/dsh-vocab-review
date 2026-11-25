@@ -44,6 +44,14 @@ const DEFAULTS = {
   // A wrong answer comes back after this fixed retry gap, never on a ladder
   // rung: a mistake is a re-learning step, not progress.
   retryDelayMinutes: 5,
+  // New words mixed into every batch. Without this, a backlog of due reviews
+  // refills the queue over and over and the user keeps seeing the same handful
+  // of words while hundreds of imported words wait forever. 0 = old behaviour
+  // (reviews first, new words only when no review is due).
+  newWordsPerBatch: 2,
+  // A word is not asked more than this many times in one day; after that its
+  // next review is deferred to the next morning. 0 = unlimited.
+  maxRepsPerDay: 3,
   // The plugin re-checks a model `✅` against the meaning it stored last time,
   // but only when the user's typed answer is actually visible as a short reply.
   // A mismatch is scheduled as wrong: the model alone must not decide that a
@@ -58,7 +66,11 @@ const DEFAULTS = {
   // Which exam's high-frequency words an article import should target:
   // gaokao | cet4 | cet6 | kaoyan | any.
   examLevel: 'cet4',
-  ladderMinutes: [30, 180, 720, 2880, 10080, 43200], // 30m, 3h, 12h, 2d, 7d, 30d — the gap a ✅ earns on the rung the word is on
+  // The gap a ✅ earns when the word sits on rung N, i.e. after N successful
+  // steps: 10m (consolidate a relearned word) → 1d → 3d → 7d → 14d → 30d.
+  // The old 30m/3h/12h/2d/7d/30d ladder re-asked a correct word 3-4 times in
+  // the same day, which is what made a session feel like "the same words again".
+  ladderMinutes: [10, 1440, 4320, 10080, 20160, 43200],
   highMultiplier: 0.7,
   lowMultiplier: 1.6,
   maxRecentErrors: 5,
@@ -136,22 +148,35 @@ function clampEase(value) {
   return Math.min(1.5, Math.max(0.7, Math.round(n * 100) / 100))
 }
 
+/** The v2.2 default ladder. Configs still carrying it are treated as "not customised". */
+const LEGACY_DEFAULT_LADDER = [30, 180, 720, 2880, 10080, 43200]
+
+function sameLadder(value) {
+  if (!Array.isArray(value) || value.length !== LEGACY_DEFAULT_LADDER.length) return false
+  return value.every((n, index) => Number(n) === LEGACY_DEFAULT_LADDER[index])
+}
+
 function resolveConfig(config) {
   const raw = config && typeof config === 'object' ? config : {}
   const ladder = Array.isArray(raw.ladderMinutes)
     ? raw.ladderMinutes.map(Number).filter((n) => Number.isFinite(n) && n > 0)
     : []
+  // v2.3.0: a config that still holds the old default is upgraded silently —
+  // the old spacing is the reported bug, not a choice a user made.
+  const ladderMinutes = ladder.length > 0 && !sameLadder(ladder) ? ladder : DEFAULTS.ladderMinutes.slice()
   const dshHome = process.env.DSH_HOME || process.env.DSH_PROFILE_DIR || join(homedir(), '.dsh')
   return {
     queueSize: clampInt(raw.queueSize, 1, 20, DEFAULTS.queueSize),
     autoContinue: raw.autoContinue === false ? false : DEFAULTS.autoContinue,
     wrongInject: clampInt(raw.wrongInject, 0, 10, DEFAULTS.wrongInject),
     retryDelayMinutes: clampNum(raw.retryDelayMinutes, 0.1, 1440, DEFAULTS.retryDelayMinutes),
+    newWordsPerBatch: clampInt(raw.newWordsPerBatch, 0, 20, DEFAULTS.newWordsPerBatch),
+    maxRepsPerDay: clampInt(raw.maxRepsPerDay, 0, 20, DEFAULTS.maxRepsPerDay),
     verifyAnswers: raw.verifyAnswers === false ? false : DEFAULTS.verifyAnswers,
     articleMaxWords: clampInt(raw.articleMaxWords, 1, 100, DEFAULTS.articleMaxWords),
     includeHighFreq: raw.includeHighFreq === false ? false : DEFAULTS.includeHighFreq,
     examLevel: normalizeExamLevel(raw.examLevel, DEFAULTS.examLevel),
-    ladderMinutes: ladder.length > 0 ? ladder : DEFAULTS.ladderMinutes.slice(),
+    ladderMinutes,
     highMultiplier: clampNum(raw.highMultiplier, 0.1, 3, DEFAULTS.highMultiplier),
     lowMultiplier: clampNum(raw.lowMultiplier, 0.5, 5, DEFAULTS.lowMultiplier),
     maxRecentErrors: clampInt(raw.maxRecentErrors, 1, 20, DEFAULTS.maxRecentErrors),
@@ -373,6 +398,8 @@ export function apply(ctx, config) {
       errors: Number.isFinite(value.errors) ? value.errors : 0,
       fuzzy: Number.isFinite(value.fuzzy) ? value.fuzzy : 0,
       lapses: Number.isFinite(value.lapses) ? value.lapses : 0,
+      reps: Number.isFinite(value.reps) ? value.reps : 0,
+      repsDate: typeof value.repsDate === 'string' ? value.repsDate : '',
       source: value.source === 'article' ? 'article' : value.source === 'exam' ? 'exam' : 'list',
     }
   }
@@ -1047,6 +1074,14 @@ export function apply(ctx, config) {
     if (isNewWord(word)) state.dailyCounters.new += 1
     else state.dailyCounters.review += 1
     state.dailyCounters.total += 1
+    // Per-day repetition counter, used by maxRepsPerDay to stop grinding one
+    // word inside a single day. It resets when the local date changes.
+    const day = todayKey()
+    if (word.repsDate !== day) {
+      word.repsDate = day
+      word.reps = 0
+    }
+    word.reps = (word.reps || 0) + 1
     word.lastAskedAt = Date.now()
     state.pendingWord = word.word
     state.pendingCounted = true
@@ -1124,10 +1159,29 @@ export function apply(ctx, config) {
     return best
   }
 
-  function intervalOf(word) {
-    const stage = Math.min(word.stage, cfg.ladderMinutes.length - 1)
+  function intervalOf(word, stageOverride) {
+    const requested = Number.isFinite(stageOverride) ? stageOverride : word.stage
+    const stage = Math.min(Math.max(0, Math.trunc(requested)), cfg.ladderMinutes.length - 1)
     const minutes = cfg.ladderMinutes[stage] * frequencyMultiplier(word.freq, cfg) * clampEase(word.ease)
     return Math.max(60_000, Math.round(minutes * 60_000))
+  }
+
+  // A word is not asked more than cfg.maxRepsPerDay times in one day: after the
+  // cap, the next review waits for the next morning. Repeated asks inside one
+  // session are what make the loop feel like "the same five words again".
+  function applyDailyCap(word) {
+    if (!(cfg.maxRepsPerDay > 0)) return
+    if ((word.reps || 0) < cfg.maxRepsPerDay) return
+    const next = nextDayStart()
+    if (word.dueAt < next) word.dueAt = next
+  }
+
+  function nextDayStart(now = Date.now()) {
+    const date = new Date(now)
+    date.setDate(date.getDate() + 1)
+    date.setHours(8, 0, 0, 0)
+    // Spread the morning batch a little so every word does not land on 08:00.
+    return date.getTime() + Math.floor(Math.random() * 90) * 60_000
   }
 
   // "Fuzzy" is a partial step. A hedged but on-target answer keeps half the
@@ -1141,10 +1195,10 @@ export function apply(ctx, config) {
   }
 
   // A word is never asked before it is due: `dueAt` is the whole schedule.
-  // A ✅ pushes it out one rung, a ❌ brings it back after retryDelayMinutes,
-  // and the queue only ever holds `dueAt <= now`. Inside that set, due reviews
-  // come before due new words and the most error-prone reviews first, so a
-  // mistake is revisited soon without breaking the spacing of everything else.
+  // Inside the due set, error-prone reviews come first, but every batch also
+  // reserves `newWordsPerBatch` slots for never-asked words: otherwise a review
+  // backlog keeps refilling the queue with the same handful of words and the
+  // hundreds of imported words never get asked at all.
   function buildQueue(now = Date.now()) {
     const due = dueNowList(now)
     const dueReviews = due.filter((word) => !isNewWord(word))
@@ -1158,13 +1212,31 @@ export function apply(ctx, config) {
       .filter((word) => !boostedSet.has(word.word))
       .sort((a, b) => a.dueAt - b.dueAt)
     const fresh = dueNew.sort((a, b) => a.dueAt - b.dueAt)
+    const newQuota = Math.min(cfg.newWordsPerBatch, cfg.queueSize)
+    const reviewTarget = cfg.queueSize - newQuota
     const picked = []
     const seen = new Set()
-    for (const word of [...boosted, ...restReviews, ...fresh]) {
-      if (picked.length >= cfg.queueSize) break
-      if (seen.has(word.word)) continue
+    const take = (word) => {
+      if (picked.length >= cfg.queueSize) return false
+      if (seen.has(word.word)) return false
       seen.add(word.word)
       picked.push(word.word)
+      return true
+    }
+    // 1. Due reviews, up to the review share of the batch.
+    for (const word of [...boosted, ...restReviews]) {
+      if (picked.length >= reviewTarget) break
+      take(word)
+    }
+    // 2. The reserved new-word slots.
+    for (const word of fresh) {
+      if (picked.length >= reviewTarget + newQuota) break
+      take(word)
+    }
+    // 3. Whatever is left when one side has fewer words than planned.
+    for (const word of [...boosted, ...restReviews, ...fresh]) {
+      if (picked.length >= cfg.queueSize) break
+      take(word)
     }
     return picked
   }
@@ -1477,13 +1549,18 @@ export function apply(ctx, config) {
       state.dailyCounters.fuzzy = (state.dailyCounters.fuzzy || 0) + 1
     } else if (verdict === 'correct') {
       // The interval belongs to the rung the word is on NOW; the ladder only
-      // steps up afterwards. A first ✅ therefore waits ladder[0] (30 min)
-      // instead of jumping straight to three hours, so a word climbs
-      // 30m -> 3h -> 12h -> 2d -> 7d -> 30d one answered question at a time.
+      // steps up afterwards. A word that is right on its very first try is
+      // already known, so it skips the 10-minute consolidation rung and starts
+      // at one day — that is what stops a known word from being asked three or
+      // four times on the same day.
       word.correct += 1
+      const cleanFirstTry =
+        word.correct === 1 && word.errors === 0 && word.fuzzy === 0 && (word.lapses || 0) === 0
+      let stage = Math.min(word.stage, cfg.ladderMinutes.length - 1)
+      if (cleanFirstTry && stage === 0) stage = Math.min(1, cfg.ladderMinutes.length - 1)
+      word.dueAt = now + intervalOf(word, stage)
+      word.stage = Math.min(stage + 1, cfg.ladderMinutes.length - 1)
       word.ease = clampEase(clampEase(word.ease) + 0.05)
-      word.dueAt = now + intervalOf(word)
-      word.stage = Math.min(word.stage + 1, cfg.ladderMinutes.length - 1)
     } else {
       word.errors += 1
       word.lastErrorAt = now
@@ -1496,6 +1573,8 @@ export function apply(ctx, config) {
       word.dueAt = now + Math.round(cfg.retryDelayMinutes * 60_000)
       state.dailyCounters.errors = (state.dailyCounters.errors || 0) + 1
     }
+    // Stop asking the same word over and over inside one day.
+    applyDailyCap(word)
     const queued = state.queue.indexOf(key)
     if (queued >= 0) state.queue.splice(queued, 1)
     if (state.pendingWord === key) {
@@ -1582,6 +1661,8 @@ export function apply(ctx, config) {
         errors: 0,
         fuzzy: 0,
         lapses: 0,
+        reps: 0,
+        repsDate: '',
         source: article ? 'article' : 'list',
       }
     }
@@ -1634,6 +1715,9 @@ export function apply(ctx, config) {
           correct: 0,
           errors: 0,
           fuzzy: 0,
+          lapses: 0,
+          reps: 0,
+          repsDate: '',
           source: 'exam',
         }
       }
@@ -2389,6 +2473,8 @@ export function apply(ctx, config) {
         articleMaxWords: cfg.articleMaxWords,
         ladder: cfg.ladderMinutes.slice(),
         retryDelayMinutes: cfg.retryDelayMinutes,
+        newWordsPerBatch: cfg.newWordsPerBatch,
+        maxRepsPerDay: cfg.maxRepsPerDay,
         lapses: all.reduce((sum, word) => sum + (word.lapses || 0), 0),
       },
       settings: {
@@ -2504,6 +2590,8 @@ export function apply(ctx, config) {
       word.fuzzy = 0
       word.correct = 0
       word.lapses = 0
+      word.reps = 0
+      word.repsDate = ''
       word.lastAskedAt = null
       word.lastResultAt = null
       word.lastErrorAt = null

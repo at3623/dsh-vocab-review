@@ -17,6 +17,7 @@ for (const locale of ['zh', 'en']) {
     assert.ok(meta[key].trim().length > 0, `${locale}.json meta.${key} is not empty`)
   }
   // A description that mentions the schedule must mention the real curve.
-  assert.match(meta.description, /30 ?分钟|30m/u, `${locale}.json describes the 30-minute first rung`)
+  assert.match(meta.description, /10 ?分钟|10m/u, `${locale}.json describes the 10-minute consolidation rung`)
+  assert.match(meta.description, /1 ?天|1d/u, `${locale}.json describes the one-day rung`)
   console.log(`PASS locale: ${locale}.json is valid JSON with a complete meta block`)
 }

@@ -118,20 +118,39 @@ dsh plugin --profile <profile> add github:at3623/dsh-vocab-review
 - 批改不是模型一个人说了算：模型给 ✅ 时，插件还会拿**上次存下的词义**和你实际打的字做比对（见下文「三档判定与二次校验」）。
 - **到期词、错误次数、每日限额、下次复习时间全部由插件计算**，模型完全不参与，所以不会算错、不会"自由发挥"。
 
-间隔阶梯（固定阶梯，类似 SM-2 的简化版）。**间隔取"当前所在的档"，答对之后才升档**，所以 30 分钟这一档是真的会用到的：
+间隔阶梯（v2.3.0 起改用「天」为单位的记忆曲线，答对一次就不在同一天反复出现）：
 
 ```text
-答对：在当档取间隔，然后升一档 → 30 分钟 → 3 小时 → 12 小时 → 2 天 → 7 天 → 30 天
-      （新词第一次答对等 30 分钟，之后 3 小时、12 小时……不是一上来就 3 小时）
-模糊：档位不动，半个间隔后重问（第 0 档 → 15 分钟；只对上一半词义时更短：×0.35）
+答对：在当前档取间隔，然后升一档
+      10 分钟 → 1 天 → 3 天 → 7 天 → 14 天 → 30 天
+      但"第一次就答对、之前没答错过"的词跳过 10 分钟这一档，直接排到 1 天后
+      （说明你可能本来就会，不需要当天再问一遍）
+模糊：档位不动，半个间隔后重问（第 0 档 → 5 分钟；只对上一半词义时更短：×0.35）
 答错：退回第 0 档，retryDelayMinutes（默认 5 分钟）后重问；从高档掉下来记一次 lapse
+再答对：先 10 分钟巩固一次，再进入 1 天
+每天上限：同一个词一天最多问 maxRepsPerDay（默认 3）次，超过就顺延到第二天早上
 高频词：间隔 × 0.7（问得更勤）   低频词：间隔 × 1.6（问得更稀）
 难度因子 ease（0.7–1.5）：答对 +0.05、模糊 −0.05、答错 −0.15
-            实际间隔 = 当前档间隔 × 频率系数 × ease —— 熟词越问越稀，生词越问越密
-另外：没有任何词会在 dueAt 之前被问到 —— 队列只装此刻已到期的词（v2.2.0）
+            实际间隔 = 当前档间隔 × 频率系数 × ease
+另外：没有任何词会在 dueAt 之前被问到 —— 队列只装此刻已到期的词
 ```
 
-也就是说，同一个词的时间线通常是：答错 → 5 分钟后回来 → 答对 → 30 分钟 → 答对 → 3 小时 → 答对 → 12 小时…… **答错和答对不会拿到一样的间隔**。如果你看到两者一样，先看面板诊断区的「插件改判」（v2.2.0 之前有一条 bug：DSH 附在消息里的 `<system-reminder>` 会被当成你的答案，导致答对的 ✅ 被误判成错，于是全变成 5 分钟重问），再考虑用「重置复习进度」清掉被误判污染的记录。
+也就是说：**答对一个词之后，当天基本不会再遇到它**（除非它是刚答错/刚模糊过、需要 10 分钟巩固一次的那种）。同一个词的时间线通常是：答错 → 5 分钟后回来 → 答对 → 10 分钟 → 答对 → 1 天 → 3 天 → 7 天……
+
+### 为什么不会"一直重复那几个词"（v2.3.0）
+
+之前有两件事叠在一起，让一节复习翻来覆去总是同一小撮词：
+
+1. **复习词挤掉了新词**：队列先装到期复习词，装满了才轮到没背过的新词。只要复习词一直到期，400 个新词就永远轮不到（实际数据里：导入 434 个词，两天只问了 31 个）。
+2. **答对的词当天被问 3–4 次**：旧阶梯是 30 分钟 → 3 小时 → 12 小时，一天之内反复到期。
+
+现在：
+
+- 每个批次**固定给新词留 `newWordsPerBatch`（默认 2）个位置**，其余留给到期复习词；复习积压不会再饿死新词；
+- 阶梯改成以天为单位（10 分钟 / 1 天 / 3 天 / 7 天 / 14 天 / 30 天），答对的词当天不再反复出现；
+- `maxRepsPerDay`（默认 3）兜底：同一个词一天最多问 3 次，超过顺延到次日早上——答错也不至于被按着头在十分钟内连问五遍。
+
+想改回"复习优先、新词靠后"的老行为：`newWordsPerBatch: 0`。想完全关掉每日次数上限：`maxRepsPerDay: 0`。
 
 ### 三档判定与二次校验
 
@@ -184,6 +203,7 @@ dsh plugin --profile <profile> add github:at3623/dsh-vocab-review
 
 - `autoContinue: true`（默认开）时，队列空了会自动用**此刻已到期**的词补满并继续问，不会再"问几个就停"。
 - 补队只用 `dueAt <= now` 的词，不会把还没到期的词提前拉进来烧配额；刚答过的词被推到下一档，不会被立刻重问。
+- **每批都给新词留座（v2.3.0）**：一批 5 个词里有 3 个到期复习 + 2 个没背过的新词（`newWordsPerBatch`）。否则复习积压会把新词永远挤在后面。
 - 结束只有两种可能，而且都会说明原因：
   - 到每日上限 → `loop: stopped`，面板显示 `今日已达上限 (review 12/12)`；
   - 没有到期词 → `loop: idle`，面板显示 `今天到期的单词都已复习完 · 下一个到期 17:35`，QQ 上会推一条 `✅ 今天到期的单词都复习完了（今日 N 个，下一个 17:35 到期）。想继续就回「开始背单词」。`
@@ -301,13 +321,15 @@ QQ 开放平台的接口有频率限制，请求太快会返回 `HTTP 400 {"code
 | --- | --- | --- |
 | `queueSize` | `5` | 一轮队列词数（1–20），只是批量大小 |
 | `autoContinue` | `true` | 队列空了自动用已到期词续轮 |
-| `wrongInject` | `2` | 每轮随机插入的错词数 |
+| `newWordsPerBatch` | `2` | 每批固定留给新词的槽位（0 = 复习优先、新词靠后） |
+| `maxRepsPerDay` | `3` | 同一个词一天最多问几次，超过顺延到次日早上（0 = 不限） |
+| `wrongInject` | `2` | 每轮把几个到期错词排到最前面（只排序，不提前） |
 | `retryDelayMinutes` | `5` | 答错后多久重问 |
 | `verifyAnswers` | `true` | 插件用已存词义二次校验模型的 ✅，不符按错处理 |
 | `articleMaxWords` | `20` | 一次文章导入最多新增多少个词（1–100）；划线图的 `extra` 高频词也用它限量 |
 | `includeHighFreq` | `true` | 划线图里没划线的考试高频词也一起入库；`false` = 只收划线词 |
 | `examLevel` | `cet4` | 文章导入的目标考试：`gaokao` / `cet4` / `cet6` / `kaoyan` / `any` |
-| `ladderMinutes` | `[30,180,720,2880,10080,43200]` | 间隔阶梯（分钟） |
+| `ladderMinutes` | `[10,1440,4320,10080,20160,43200]` | 间隔阶梯（分钟）：10 分钟 / 1 / 3 / 7 / 14 / 30 天 |
 | `highMultiplier` / `lowMultiplier` | `0.7` / `1.6` | 高频词更勤 / 低频词更稀 |
 | `maxRecentErrors` | `5` | 面板最近错词条数 |
 | `startPrompt` / `continuePrompt` | `开始词汇复习` / `继续复习` | 注入的提示词 |
@@ -339,7 +361,7 @@ npm test          # 4 个离线 harness
 npm run check     # 语法检查
 ```
 
-- `test/harness.mjs` —— 36 项：导入、✅/❌/🤔 记账、压缩注入、停止/继续、每日限额、面板改限额、每日提醒、跨天清零、重启持久化、QQ 通道、**自动续轮**、QQ 自动停下时推一条说明、**插件否决模型 ✅**、**模糊半档**、**🤔 后正常 ✅ 升档**、**薄弱词本 + 已掌握/重问/删除 + CSV 导出**、**ledger 版本守卫**、**「不知道」一律算错**、**短中文近义半会并记入词义池**、**文章导入（过滤基础词 + 拒收 `:out` 超纲词 + 限流 + 不自动开始）**、**文章导入边界（全是基础词 / 已有词）**、**考试范围（单次指定考试、`:out` 拒收、`examLevel` 默认值）**、**难度因子 ease**、**CSV/JSON/Anki 三种导出**、**每日历史**、**诊断字段与上次导入**、**1500 词性能**、**划线图附带 `extra` 高频词（过滤 + 限量 + 来源标记）**、**`includeHighFreq:false` 只收划线词**、**HTTP 路由的 connection 信任检查**、**阶梯曲线（✅ 30 分钟→3 小时→12 小时、❌ 5 分钟回到第一档并记 lapse）**、**不会提前问到期的词**、**`<system-reminder>` 不再误否决 ✅**、**重置进度（需确认、保留词义）**。
+- `test/harness.mjs` —— 38 项：导入、✅/❌/🤔 记账、压缩注入、停止/继续、每日限额、面板改限额、每日提醒、跨天清零、重启持久化、QQ 通道、**自动续轮**、QQ 自动停下时推一条说明、**插件否决模型 ✅**、**模糊半档**、**🤔 后正常 ✅ 升档**、**薄弱词本 + 已掌握/重问/删除 + CSV 导出**、**ledger 版本守卫**、**「不知道」一律算错**、**短中文近义半会并记入词义池**、**文章导入（过滤基础词 + 拒收 `:out` 超纲词 + 限流 + 不自动开始）**、**文章导入边界（全是基础词 / 已有词）**、**考试范围（单次指定考试、`:out` 拒收、`examLevel` 默认值）**、**难度因子 ease**、**CSV/JSON/Anki 三种导出**、**每日历史**、**诊断字段与上次导入**、**1500 词性能**、**划线图附带 `extra` 高频词（过滤 + 限量 + 来源标记）**、**`includeHighFreq:false` 只收划线词**、**HTTP 路由的 connection 信任检查**、**阶梯曲线（首次答对直接 1 天 → 3 天 → 7 天+；答错 5 分钟；重学先 10 分钟）**、**不会提前问到期的词**、**`<system-reminder>` 不再误否决 ✅**、**重置进度（需确认、保留词义）**、**每日次数上限 maxRepsPerDay**、**复习积压时每批仍给新词留位**。
 - `test/qq-builtin.mjs` —— 内置 QQ 的离线联调（假网关 + 假 HTTP）：token→gateway→identify、心跳、入境文字→会话提示→回传、入境图片→图片块、命令「开始背单词」直接推题、答题批改后推下一题、`/start /stats /stop /reset /help` 命令面板、消息去重、断线/禁用状态、**限流后按冷却时间重试而不是猛刷 `/gateway`**、**token 与网关地址缓存复用**、**会话失效丢弃网关缓存**。
 - `test/sessions-stop.mjs` —— 对话列表/选择持久化/路由、强暂停、归档回落。
 - `test/client-load-check.mjs` —— 用 mock loader 跑一遍 Client 半边，确认侧栏与面板注册。
@@ -418,8 +440,23 @@ The third-party `@hualiong/dsh-qq-bot` plugin is only an **alternative transport
 
    The model asks exactly one word (`Q: {word}`). After the answer it emits exactly one line, `✅ {word} = {meaning}` (known), `🤔 {word} = {meaning}` (half-known) or `❌ {word} = {meaning}` (unknown). The plugin watches the committed session event, records the result, and wakes the same chat with `继续复习` for the next word. The model never computes due words, quota, or scheduling — and it does not get the final say on correctness either: a model `✅` is re-checked against the stored meaning (see below).
 3. **Wrong-word ledger** — every error increments `errors` and stamps `lastErrorAt` in `<DSH_HOME>/vocab-review/ledger.json`; a fuzzy answer increments `fuzzy` instead. A correct answer advances the spaced-repetition stage and schedules the next review; the error history stays.
-4. **Spaced repetition** — ladder `30m → 3h → 12h → 2d → 7d → 30d`. A correct answer takes the interval of the **current** rung and only then advances one rung, so a brand-new word that you answer correctly waits 30 minutes before it jumps to 3 hours. A per-word **ease factor** (0.7–1.5; +0.05 per correct answer, −0.05 fuzzy, −0.15 wrong) bends each rung: a word you keep getting right drifts out, a shaky word tightens up. A wrong answer resets the word to stage 0 and re-queues it after `retryDelayMinutes` (default 5) — a mistake is a re-learning step, never a ladder rung. The queue builder only ever holds words whose `dueAt <= now`: due reviews first (the most error-prone ones are boosted to the front by `wrongInject`), then due new words. Nothing is pulled forward before its due time.
+4. **Spaced repetition** — since v2.3.0 the ladder is measured in days: `10m → 1d → 3d → 7d → 14d → 30d`. A correct answer takes the interval of the **current** rung and only then advances one rung, and a word that is right on its very first try (no earlier mistake or fuzzy answer) skips the 10-minute consolidation rung and starts at one day — that is what stops a known word from being asked three or four times on the same day. A per-word **ease factor** (0.7–1.5; +0.05 per correct, −0.05 fuzzy, −0.15 wrong) bends each rung. A wrong answer resets the word to stage 0 and re-queues it after `retryDelayMinutes` (default 5); the following correct answer takes the 10-minute consolidation rung before moving to one day. `maxRepsPerDay` (default 3) is the hard ceiling: a word asked that often in one day is deferred to the next morning. The queue only ever holds words whose `dueAt <= now`, and every batch reserves `newWordsPerBatch` (default 2) slots for never-asked words so a review backlog cannot starve them.
 5. **Persistence** — `ledger.json` (words, queue, loop state, daily counters) and `settings.json` (limits + reminder bookkeeping) are written atomically (temp file + rename). Page reloads never touch Host state; a Host restart reloads the queue and keeps the loop **stopped** until Start is pressed.
+
+## Why the same words kept coming back (v2.3.0)
+
+Two things used to stack up and make a session feel like the same handful of words over and over:
+
+1. **Reviews crowded out new words.** The queue filled with due review words first and only reached never-asked words when no review was due. In the real ledger: 434 words imported, only 31 ever asked — the other 403 never got a turn.
+2. **A correct word came back three or four times a day.** The old ladder was 30m → 3h → 12h, so a word answered correctly at 9:00 was due again at 9:30, 12:30 and 00:30.
+
+Now:
+
+- every batch reserves `newWordsPerBatch` (default 2) slots for never-asked words; a review backlog cannot starve them any more;
+- the ladder is measured in days (10m / 1d / 3d / 7d / 14d / 30d) and a word that is right on its first try skips the 10-minute rung, so a known word does not reappear the same day;
+- `maxRepsPerDay` (default 3) is the hard ceiling — a word asked that often in one day is deferred to the next morning instead of being drilled again and again.
+
+Set `newWordsPerBatch: 0` for the old "reviews first" behaviour; `maxRepsPerDay: 0` removes the daily cap.
 
 ## Article images (exam high-frequency words)
 
@@ -456,6 +493,7 @@ The division of labour: **underlined worksheet = the user chose, the plugin take
 A queue holds `queueSize` words (default 5) — that is a **batch size, not a session length**. With `autoContinue` on (the default), the loop refills itself from words that are due **now** and keeps asking, so it no longer goes quiet after a handful of words.
 
 - Refill only takes words whose `dueAt <= now`, so auto-continue never asks a word far ahead of its schedule. A word that was just answered is pushed forward (`ladder`, or `retryDelayMinutes` after an error) and therefore is not re-picked immediately.
+- **Every batch keeps slots for new words (v2.3.0)**: of 5 words, 3 are due reviews and 2 are never-asked words (`newWordsPerBatch`). Without that, a review backlog refills the queue with the same handful of words forever.
 - The loop now ends in exactly two ways: the daily limit is hit (`loop: "stopped"` plus `今日已达上限 (…)`), or nothing is due any more (`loop: "idle"` plus `idleReason`).
 - When it stops by itself it says why instead of going silent: the panel shows `今天到期的单词都已复习完 · 下一个到期 17:35`, and in QQ mode the plugin pushes one short line — `✅ 今天到期的单词都复习完了（今日 N 个，下一个 17:35 到期）。想继续就回「开始背单词」。`
 - `autoContinue: false` in the plugin config restores the old "one batch per Start" behaviour; `queueSize` (1–20) tunes the batch.
@@ -466,7 +504,7 @@ Two tiers force "recognised after a pause" into "known", which pushes the word 3
 
 | Grade | When | Scheduling |
 | --- | --- | --- |
-| `✅` known | Answer matches the meaning | Takes the interval of the **current** rung, then advances one rung |
+| `✅` known | Answer matches the meaning | Takes the interval of the **current** rung, then advances one rung; a clean first try skips the 10m rung |
 | `🤔` half-known | Right, but the user hedged (`好像…`, `不确定`), gave only part of the meaning, or asked back | Stage unchanged, comes back after **half** the current interval at most (×0.35 when only half the gloss matched) |
 | `❌` unknown | Wrong, "不知道/忘了", or no answer | Reset to stage 0, re-ask after `retryDelayMinutes` |
 
@@ -615,7 +653,7 @@ It is silent: no prompt, no `steer`, no fake transcript message. Afterwards the 
 ## Verification
 
 - `npm test` — runs the four offline harnesses below.
-- `node test/harness.mjs` — Host harness: 3-word import, ✅/❌ ledger updates, compact injection, loop Pause (no prompt, queue kept), Start resume without double-counting, `dailyTotalLimit=5`, live settings edits, once-per-day reminder, date rollover, reload persistence, the QQ channel (binding discovery, Start pushes `Q:` through `send_qq_message` without prompting the web session, QQ-graded answer recorded, next question pushed only after that turn ends), continuous review (with `queueSize: 2` the loop still asks all 5 due words, then goes `idle` with a `no-due` reason), the QQ idle note, **the plugin veto (a model `✅` with a different meaning is scheduled as wrong)**, **the fuzzy half-step**, **a fuzzy followed by a matching ✅ advancing the ladder**, **the weak-word book plus Known/Ask again/Remove and the CSV export**, **the ledger schema guard**, **"不知道" being wrong even when the model says `✅`**, **a half-matched rewording graded half-known and joining the gloss pool**, **the article import (basic words filtered, `:out` refused, batch capped, loop waiting for Start, protocol updated)**, **the article edge cases (all-basic list, already-known words)**, **the exam scope (per-call exam level, `:out` refusal, `examLevel` as the default)**, **the ease factor**, **CSV/JSON/Anki exports**, **the daily history**, **diagnostics + last import**, **the 1500-word performance check**, **exam high-frequency `extra` words on a worksheet import (filtered, capped, source `exam`)**, **`includeHighFreq: false` importing underlined words only**, and **the connection trust fence on the HTTP routes**, **the ladder curve (✅ 30m → 3h → 12h, ❌ retried after 5m from the bottom rung plus a lapse count)**, **Start never pulling a word forward before its `dueAt`**, **`<system-reminder>` no longer vetoing a correct `✅`**, and **reset progress (confirmation required, glosses kept)**.
+- `node test/harness.mjs` — Host harness: 3-word import, ✅/❌ ledger updates, compact injection, loop Pause (no prompt, queue kept), Start resume without double-counting, `dailyTotalLimit=5`, live settings edits, once-per-day reminder, date rollover, reload persistence, the QQ channel (binding discovery, Start pushes `Q:` through `send_qq_message` without prompting the web session, QQ-graded answer recorded, next question pushed only after that turn ends), continuous review (with `queueSize: 2` the loop still asks all 5 due words, then goes `idle` with a `no-due` reason), the QQ idle note, **the plugin veto (a model `✅` with a different meaning is scheduled as wrong)**, **the fuzzy half-step**, **a fuzzy followed by a matching ✅ advancing the ladder**, **the weak-word book plus Known/Ask again/Remove and the CSV export**, **the ledger schema guard**, **"不知道" being wrong even when the model says `✅`**, **a half-matched rewording graded half-known and joining the gloss pool**, **the article import (basic words filtered, `:out` refused, batch capped, loop waiting for Start, protocol updated)**, **the article edge cases (all-basic list, already-known words)**, **the exam scope (per-call exam level, `:out` refusal, `examLevel` as the default)**, **the ease factor**, **CSV/JSON/Anki exports**, **the daily history**, **diagnostics + last import**, **the 1500-word performance check**, **exam high-frequency `extra` words on a worksheet import (filtered, capped, source `exam`)**, **`includeHighFreq: false` importing underlined words only**, **the connection trust fence on the HTTP routes**, **the ladder curve (a clean first ✅ waits 1d → 3d → 7d+, a ❌ retries in 5m, a relearned word takes the 10m rung)**, **Start never pulling a word forward before its `dueAt`**, **`<system-reminder>` no longer vetoing a correct `✅`**, **reset progress (confirmation required, glosses kept)**, **the daily `maxRepsPerDay` cap**, and **a review backlog no longer starving never-asked words**.
 - `node test/qq-builtin.mjs` — offline built-in QQ test with a fake gateway and fake HTTP: token → gateway → identify, heartbeat, inbound text → session prompt → relay, inbound image → image prompt block, 开始背单词 pushing `Q:` directly, grading round trip + next question, the `/start /stats /stop /reset /help` command panel, message deduplication, disconnect/disable status, **rate-limit parking with a retry time instead of hammering `/gateway`**, **cached token + gateway URL on reconnect**, and **an invalid session dropping the gateway cache**.
 - `node test/sessions-stop.mjs` — conversation list (titles, archived/subagent excluded), selection persisted in `settings.json` + reload, Start routed to the selected session, strong-pause Stop (cancel + jobs/terminals/subagents, silent, `turnInFlight` false), idle Stop no-op, archived-selection fallback.
 - `node test/client-load-check.mjs` — evaluates the Client bundle with a mocked module loader and asserts the sidebar/main registrations.

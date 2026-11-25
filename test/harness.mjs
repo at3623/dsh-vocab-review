@@ -613,7 +613,7 @@ assert.equal(fuzzyLedger.words.cautious.correct, 0)
 assert.equal(fuzzyLedger.words.cautious.errors, 0)
 assert.equal(fuzzyLedger.words.cautious.stage, 0, 'fuzzy does not advance the ladder')
 const fuzzyDueIn = fuzzyLedger.words.cautious.dueAt - Date.now()
-assert.ok(fuzzyDueIn > 14 * 60_000 && fuzzyDueIn < 16 * 60_000, `fuzzy returns at half of 30m, got ${Math.round(fuzzyDueIn / 60_000)}m`)
+assert.ok(fuzzyDueIn > 4 * 60_000 && fuzzyDueIn <= 6 * 60_000, `fuzzy returns at half of the 10m rung, got ${Math.round(fuzzyDueIn / 60_000)}m`)
 console.log('PASS fuzzy: a hedged answer is neither correct nor wrong; half interval, stage kept')
 
 // ── 16. Explicit 🤔 line, then a real ✅ advances the ladder ─────────────
@@ -639,8 +639,8 @@ assert.equal(halfLedger.words.benefit.correct, 1)
 assert.equal(halfLedger.words.benefit.stage, 1, 'a matching ✅ advances the ladder after a fuzzy')
 const firstGap = halfLedger.words.benefit.dueAt - Date.now()
 assert.ok(
-  firstGap > 20 * 60_000 && firstGap < 40 * 60_000,
-  `a first ✅ waits the 30m rung, got ${Math.round(firstGap / 60_000)}m`,
+  firstGap > 8 * 60_000 && firstGap < 12 * 60_000,
+  `a ✅ after a fuzzy still takes the 10m consolidation rung, got ${Math.round(firstGap / 60_000)}m`,
 )
 assert.equal(halfLedger.lastConflict, null, 'a matching answer never creates a veto')
 console.log('PASS half-step: 🤔 is recorded as fuzzy, the following matching ✅ advances the ladder')
@@ -853,7 +853,7 @@ await settle()
 easeLedger = loadLedger(easeDir)
 assert.equal(easeLedger.words.abandon.ease, 0.9, 'a correct answer raises ease by 0.05')
 const easeDueIn = easeLedger.words.abandon.dueAt - Date.now()
-assert.ok(easeDueIn > 25 * 60_000 && easeDueIn < 30 * 60_000, `the 30m rung scaled by ease 0.9, got ${Math.round(easeDueIn / 60_000)}m`)
+assert.ok(easeDueIn > 8 * 60_000 && easeDueIn < 10 * 60_000, `the 10m rung scaled by ease 0.9, got ${Math.round(easeDueIn / 60_000)}m`)
 console.log('PASS ease: wrong answers shrink intervals, correct answers stretch them, clamped 0.7-1.5')
 
 // ── 26. Export formats: CSV, JSON, Anki TSV ──────────────────────────────
@@ -990,14 +990,15 @@ assert.equal(allowed.status, 200, 'a trusted request still works')
 assert.equal(allowed.body.ok, true)
 console.log('PASS access check: routes honour the connection trust fence and pass trusted requests')
 
-// ── 33. The schedule is a curve: ✅ climbs the ladder, ❌ is a short retry ─
+// ── 33. The schedule is a curve: a clean ✅ jumps to one day, then 3d/7d; ❌ is a 5m retry ─
 const curveDir = join(root, 'curve')
-const curveSeed = freshEnv(curveDir)
+const curveConfig = { maxRepsPerDay: 0 }
+const curveSeed = freshEnv(curveDir, curveConfig)
 await curveSeed.tools.get('vocab_import').execute({ words: 'gamma' }, { agent: curveSeed.agent })
 // Answer once, then force the word due again so the next answer arrives without
 // waiting for the real interval.
 async function answerCurve(dir, grade) {
-  const answerEnv = freshEnv(dir)
+  const answerEnv = freshEnv(dir, curveConfig)
   await post(answerEnv, 'start')
   fireUser(answerEnv, 'm')
   fire(answerEnv, answerText(grade))
@@ -1013,20 +1014,22 @@ async function answerCurve(dir, grade) {
   return { word, gapMin, ledgerAfter }
 }
 const rung1 = await answerCurve(curveDir, '✅ gamma = m')
-assert.equal(rung1.word.stage, 1, 'the first ✅ moves the word to rung 1')
-assert.ok(rung1.gapMin >= 20 && rung1.gapMin <= 40, `first ✅ waits the 30m rung, got ${rung1.gapMin}m`)
+assert.equal(rung1.word.stage, 2, 'a clean first ✅ skips the 10m rung and is already two steps up')
+assert.ok(rung1.gapMin >= 1400 && rung1.gapMin <= 1500, `a clean first ✅ waits one day, got ${rung1.gapMin}m`)
 const rung2 = await answerCurve(curveDir, '✅ gamma = m')
-assert.equal(rung2.word.stage, 2)
-assert.ok(rung2.gapMin >= 150 && rung2.gapMin <= 240, `second ✅ waits the 3h rung, got ${rung2.gapMin}m`)
+assert.equal(rung2.word.stage, 3)
+assert.ok(rung2.gapMin >= 4300 && rung2.gapMin <= 4700, `the second ✅ waits three days, got ${rung2.gapMin}m`)
 const rung3 = await answerCurve(curveDir, '✅ gamma = m')
-assert.equal(rung3.word.stage, 3)
-assert.ok(rung3.gapMin >= 600, `third ✅ waits the 12h rung, got ${rung3.gapMin}m`)
+assert.equal(rung3.word.stage, 4)
+assert.ok(rung3.gapMin >= 10_000, `the third ✅ waits over a week, got ${rung3.gapMin}m`)
 const lapse = await answerCurve(curveDir, '❌ gamma = m')
 assert.equal(lapse.word.stage, 0, 'a mistake drops the word to the bottom rung')
 assert.equal(lapse.word.lapses, 1, 'a lapse from a graduated word is counted')
 assert.ok(lapse.gapMin >= 4 && lapse.gapMin <= 6, `a mistake retries after 5m, got ${lapse.gapMin}m`)
-assert.ok(lapse.gapMin < rung1.gapMin, 'a mistake comes back sooner than a correct answer')
-console.log('PASS curve: ✅ waits 30m→3h→12h, ❌ retries after 5m from the bottom rung')
+const relearn = await answerCurve(curveDir, '✅ gamma = m')
+assert.equal(relearn.word.stage, 1, 'a relearned word takes the 10m consolidation rung')
+assert.ok(relearn.gapMin >= 9 && relearn.gapMin <= 12, `a ✅ after a mistake waits 10m, got ${relearn.gapMin}m`)
+console.log('PASS curve: a clean ✅ waits 1d → 3d → 7d+, a ❌ retries in 5m, a relearned word takes 10m')
 
 // ── 34. Nothing is asked before it is due ────────────────────────────────
 const earlyDir = join(root, 'early')
@@ -1091,7 +1094,77 @@ assert.equal(gammaAfterReset.lapses, 0)
 assert.equal(gammaAfterReset.meaning, 'm', 'the stored gloss survives a reset')
 assert.ok(gammaAfterReset.dueAt <= Date.now() + 1_000, 'every word is due again after a reset')
 assert.deepEqual(resetLedger.queue, [])
+assert.equal(gammaAfterReset.reps, 0, 'a reset also clears the per-day repetition counter')
 console.log('PASS reset: confirmed reset clears the schedule, keeps the glosses, re-dates every word')
+
+// ── 37. maxRepsPerDay: a word is not ground through the same day ─────────
+const capDir = join(root, 'daily-cap')
+const capConfig = { maxRepsPerDay: 2 }
+const capSeed = freshEnv(capDir, capConfig)
+await capSeed.tools.get('vocab_import').execute({ words: 'zulu' }, { agent: capSeed.agent })
+fireUser(capSeed, 'x')
+fire(capSeed, answerText('❌ zulu = m'))
+await settle()
+let capLedger = loadLedger(capDir)
+assert.equal(capLedger.words.zulu.reps, 1, 'the first ask is counted for today')
+assert.ok(capLedger.words.zulu.dueAt < Date.now() + 10 * 60_000, 'the first miss still retries in 5m')
+capLedger.words.zulu.dueAt = Date.now() - 1_000
+capLedger.words.zulu.lastResultAt = Date.now() - 6_000
+writeFileSync(join(capDir, 'ledger.json'), JSON.stringify(capLedger))
+const capEnv2 = freshEnv(capDir, capConfig)
+assert.equal((await post(capEnv2, 'start')).ok, true)
+fireUser(capEnv2, 'y')
+fire(capEnv2, answerText('❌ zulu = m'))
+await settle()
+capLedger = loadLedger(capDir)
+assert.equal(capLedger.words.zulu.reps, 2)
+assert.equal(capLedger.words.zulu.repsDate, today())
+assert.ok(
+  capLedger.words.zulu.dueAt > Date.now() + 12 * 3600_000,
+  'after the daily cap the word is deferred to the next morning instead of looping',
+)
+assert.equal(
+  new Date(capLedger.words.zulu.dueAt).getDate(),
+  new Date(Date.now() + 24 * 3600_000).getDate(),
+  'the deferred word lands on the next day',
+)
+const capState = await state(freshEnv(capDir, capConfig))
+assert.equal(capState.queue.includes('zulu'), false, 'a capped word is not re-queued today')
+console.log('PASS daily cap: maxRepsPerDay stops the same word from being asked again and again in one day')
+
+// ── 38. Every batch keeps room for new words while reviews are due ──────
+const mixDir = join(root, 'mix')
+const mixEnv = freshEnv(mixDir, { queueSize: 4, newWordsPerBatch: 2 })
+await mixEnv.tools.get('vocab_import').execute({ words: 'one, two, three, four' }, { agent: mixEnv.agent })
+assert.deepEqual(loadLedger(mixDir).queue, ['one', 'two', 'three', 'four'])
+for (let index = 0; index < 4; index++) {
+  const pending = loadLedger(mixDir).pendingWord
+  fireUser(mixEnv, 'm')
+  fire(mixEnv, answerText(`✅ ${pending} = m`))
+  await settle()
+}
+// Force a mixed state: two due reviews plus two never-asked words.
+const mixLedger = loadLedger(mixDir)
+for (const key of ['one', 'two']) {
+  mixLedger.words[key].lastResultAt = null
+  mixLedger.words[key].correct = 0
+  mixLedger.words[key].stage = 0
+  mixLedger.words[key].dueAt = Date.now() - 1_000
+}
+for (const key of ['three', 'four']) mixLedger.words[key].dueAt = Date.now() - 1_000
+mixLedger.queue = []
+mixLedger.loop = 'stopped'
+writeFileSync(join(mixDir, 'ledger.json'), JSON.stringify(mixLedger))
+const mixEnv2 = freshEnv(mixDir, { queueSize: 4, newWordsPerBatch: 2 })
+const mixStart = await post(mixEnv2, 'start')
+assert.equal(mixStart.ok, true)
+const mixState = mixStart.value
+assert.equal(mixState.queue.length, 4, 'a full batch is built')
+const queuedNew = mixState.queue.filter((key) => mixLedger.words[key].lastResultAt === null)
+const queuedReviews = mixState.queue.filter((key) => mixLedger.words[key].lastResultAt !== null)
+assert.equal(queuedNew.length, 2, 'two slots are reserved for never-asked words')
+assert.equal(queuedReviews.length, 2, 'the rest of the batch is due reviews')
+console.log('PASS interleaving: a review backlog no longer starves the never-asked words')
 
 rmSync(root, { recursive: true, force: true })
 console.log('\nALL CHECKS PASSED')
